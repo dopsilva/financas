@@ -55,13 +55,16 @@ Sistema completo de gestão financeira pessoal escrito em **[Sea](https://github
 
 ## Pré-requisitos
 
-É necessário ter a VM **Sea** (`~/projects/sea_vm`) compilada com as bibliotecas `sqlite` e `http`:
+É necessário ter a VM **[Sea](https://github.com/dopsilva/sea)** compilada com as bibliotecas `sqlite`, `ssl` e `http`:
 
 ```bash
-cd ~/projects/sea_vm
+git clone https://github.com/dopsilva/sea.git
+cd sea
 make
 make -C libs/sqlite
+make -C libs/ssl
 make -C libs/http
+sudo make install
 ```
 
 ---
@@ -69,11 +72,15 @@ make -C libs/http
 ## Como Executar
 
 ```bash
+# Clonar o repositório
+git clone https://github.com/dopsilva/financas.git
+cd financas
+
 # Iniciar o servidor web na porta 8080 (banco de dados local financas.db)
 make run
 
-# Ou diretamente com flags customizadas:
-~/projects/sea_vm/bin/sea main.sea -port 8080 -db financas.db
+# Ou diretamente com o binário sea:
+sea main.sea -port 8080 -db financas.db
 ```
 
 Acesse **`http://localhost:8080`** no navegador.
