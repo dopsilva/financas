@@ -14,8 +14,11 @@ Sistema completo de gestão financeira pessoal escrito em **[Sea](https://github
   - Cadastro completo com atalhos para os principais bancos brasileiros (Itaú `341`, Banco do Brasil `001`, Nubank `260`, Bradesco `237`, Caixa `104`, Santander `033`, Inter `077`, C6 `336`, BTG `208`, Sicredi `748`, Sicoob `756`, XP `348`).
   - Campos para agência, número da conta com dígito, chave PIX principal, saldo inicial, limite de cheque especial/crédito, dias de fechamento/vencimento e observações.
   - **Ajuste/Conciliação de Saldo** automático, filtro direto de extrato por conta e transferências entre contas.
+- **Cadastro de Pessoas (Pessoa Física `PF` & Pessoa Jurídica `PJ`)**:
+  - Cadastro de clientes, fornecedores, prestadores, funcionários ou pessoas em geral (`PF` ou `PJ`), onde o **documento CPF/CNPJ é opcional** (não obrigatório).
+  - Acompanhamento consolidado por pessoa de **Contas a Receber** (pendentes e recebidas) e **Contas a Pagar** (pendentes e pagas), além de chave PIX, telefone, e-mail e filtro direto de lançamentos por pessoa.
 - **Contas a Pagar, a Receber e Transferências**:
-  - Lançamento por categoria de **Receita** ou **Despesa**, conta bancária, forma de pagamento (PIX, Boleto, Cartão de Crédito/Débito, TED/DOC, Débito Automático, Espécie), favorecido/pagador e tags.
+  - Lançamento vinculado a uma **Pessoa (PF/PJ)**, por categoria de **Receita** ou **Despesa**, conta bancária, forma de pagamento (PIX, Boleto, Cartão de Crédito/Débito, TED/DOC, Débito Automático, Espécie), favorecido/pagador e tags.
   - **Parcelamento Automático**: suporte para lançamentos parcelados (`2x` a `36x`+) gerando todas as parcelas nos meses subsequentes.
   - **Baixa Completa**: confirmação de pagamento/recebimento com cálculo de **Desconto** e **Juros/Multa**, além de estorno/reabertura e exportação para **CSV**.
 - **Contas Recorrentes (Fixas e Assinaturas)**:

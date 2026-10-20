@@ -150,6 +150,47 @@ function M.build_router(store, public_dir)
         return json_ok(res)
     end)
 
+    -- ---- PEOPLE (PESSOAS FÍSICAS E JURÍDICAS) ----
+    r.get("/api/people", function(req)
+        local filters = {
+            person_type = req.query["person_type"],
+            search = req.query["search"],
+        }
+        local res = locked(function()
+            return store:list_people(filters)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/people", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:create_person(body)
+        end)
+        return json_ok(res, 201)
+    end)
+
+    r.put("/api/people/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:update_person(id, body)
+        end)
+        return json_ok(res)
+    end)
+
+    r.delete("/api/people/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:delete_person(id)
+        end)
+        return json_ok(res)
+    end)
+
     -- ---- TRANSACTIONS (CONTAS A PAGAR E A RECEBER) ----
     r.get("/api/transactions", function(req)
         local filters = {
@@ -160,6 +201,7 @@ function M.build_router(store, public_dir)
             status = req.query["status"],
             category_id = req.query["category_id"],
             account_id = req.query["account_id"],
+            person_id = req.query["person_id"],
             search = req.query["search"],
         }
         local res = locked(function()

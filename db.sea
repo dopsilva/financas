@@ -37,6 +37,21 @@ CREATE TABLE IF NOT EXISTS categories (
     created_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS people (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    trade_name      TEXT NOT NULL DEFAULT '',
+    person_type     TEXT NOT NULL DEFAULT 'PF',
+    role            TEXT NOT NULL DEFAULT 'both',
+    document        TEXT NOT NULL DEFAULT '',
+    email           TEXT NOT NULL DEFAULT '',
+    phone           TEXT NOT NULL DEFAULT '',
+    pix_key         TEXT NOT NULL DEFAULT '',
+    notes           TEXT NOT NULL DEFAULT '',
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recurring_rules (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     description     TEXT NOT NULL,
@@ -44,6 +59,7 @@ CREATE TABLE IF NOT EXISTS recurring_rules (
     type            TEXT NOT NULL,
     account_id      INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
     category_id     INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    person_id       INTEGER REFERENCES people(id) ON DELETE SET NULL,
     payment_method  TEXT NOT NULL DEFAULT 'pix',
     contact         TEXT NOT NULL DEFAULT '',
     notes           TEXT NOT NULL DEFAULT '',
@@ -70,6 +86,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     account_id             INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
     destination_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
     category_id            INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    person_id              INTEGER REFERENCES people(id) ON DELETE SET NULL,
     payment_method         TEXT NOT NULL DEFAULT 'pix',
     contact                TEXT NOT NULL DEFAULT '',
     notes                  TEXT NOT NULL DEFAULT '',
@@ -221,6 +238,20 @@ function Store.ensure_defaults(self)
     end
     if not has_col["notes"] then
         self.db:exec("ALTER TABLE accounts ADD COLUMN notes TEXT NOT NULL DEFAULT ''")?
+    end
+
+    local tx_cols = self.db:query("PRAGMA table_info(transactions)")?
+    local has_tx_col = [=]
+    for _, c in tx_cols do has_tx_col[c.name] = true end
+    if not has_tx_col["person_id"] then
+        self.db:exec("ALTER TABLE transactions ADD COLUMN person_id INTEGER REFERENCES people(id) ON DELETE SET NULL")?
+    end
+
+    local rec_cols = self.db:query("PRAGMA table_info(recurring_rules)")?
+    local has_rec_col = [=]
+    for _, c in rec_cols do has_rec_col[c.name] = true end
+    if not has_rec_col["person_id"] then
+        self.db:exec("ALTER TABLE recurring_rules ADD COLUMN person_id INTEGER REFERENCES people(id) ON DELETE SET NULL")?
     end
 
     local cat_count = self.db:value("SELECT count(*) FROM categories")?
@@ -456,6 +487,108 @@ function Store.clear_all_transactions(self)
     self.db:exec("DELETE FROM recurring_rules")?
     self.db:exec("DELETE FROM goals")?
     self.db:exec("DELETE FROM accounts")?
+    self.db:exec("DELETE FROM people")?
+    return {ok = true}
+end
+
+-- ---- PEOPLE (PESSOAS FÍSICAS E JURÍDICAS) ----
+
+function Store.list_people(self, filters)
+    filters = filters or {}
+    local where = ["p.active = 1"]
+    local params = []
+
+    if filters.person_type ~= nil and filters.person_type ~= "" and filters.person_type ~= "all" then
+        where[] = "p.person_type = ?"
+        params[] = filters.person_type
+    end
+
+    if filters.search ~= nil and string.trim(filters.search) ~= "" then
+        local q = "%" .. string.trim(filters.search) .. "%"
+        where[] = "(p.name LIKE ? OR p.trade_name LIKE ? OR p.document LIKE ? OR p.email LIKE ? OR p.phone LIKE ?)"
+        params[] = q
+        params[] = q
+        params[] = q
+        params[] = q
+        params[] = q
+    end
+
+    local sql = `
+        SELECT p.*,
+               COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.status = 'paid' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS paid_expense,
+               COALESCE(SUM(CASE WHEN t.type = 'expense' AND t.status = 'pending' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS pending_expense,
+               COALESCE(SUM(CASE WHEN t.type = 'income' AND t.status = 'paid' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS paid_income,
+               COALESCE(SUM(CASE WHEN t.type = 'income' AND t.status = 'pending' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS pending_income,
+               COUNT(t.id) AS tx_count
+        FROM people p
+        LEFT JOIN transactions t ON t.person_id = p.id AND t.status IN ('paid', 'pending')
+        WHERE ${string.join(where, " AND ")}
+        GROUP BY p.id
+        ORDER BY p.name ASC
+    `
+    local rows = self.db:query(sql, params)?
+    for _, r in rows do
+        r.paid_expense = round2(r.paid_expense)
+        r.pending_expense = round2(r.pending_expense)
+        r.paid_income = round2(r.paid_income)
+        r.pending_income = round2(r.pending_income)
+    end
+    return rows
+end
+
+function Store.create_person(self, data)
+    local name = string.trim(data.name or "")
+    if name == "" then return error("O nome da pessoa ou empresa é obrigatório") end
+    local trade_name = string.trim(data.trade_name or "")
+    local person_type = string.upper(string.trim(data.person_type or "PF"))
+    if person_type ~= "PF" and person_type ~= "PJ" then
+        person_type = "PF"
+    end
+    local role = data.role or "both"
+    local document = string.trim(data.document or "")
+    local email = string.trim(data.email or "")
+    local phone = string.trim(data.phone or "")
+    local pix_key = string.trim(data.pix_key or "")
+    local notes = string.trim(data.notes or "")
+
+    self.db:exec(
+        `INSERT INTO people (name, trade_name, person_type, role, document, email, phone, pix_key, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        name, trade_name, person_type, role, document, email, phone, pix_key, notes, now_iso()
+    )?
+    local id = self.db:last_insert_id()
+    return self.db:row("SELECT * FROM people WHERE id = ?", id)
+end
+
+function Store.update_person(self, id, data)
+    local existing = self.db:row("SELECT * FROM people WHERE id = ?", id)?
+    if existing == nil then return error("Pessoa não encontrada") end
+
+    local name = data.name ~= nil and string.trim(data.name) or existing.name
+    if name == "" then return error("O nome é obrigatório") end
+    local trade_name = data.trade_name ~= nil and string.trim(data.trade_name) or existing.trade_name
+    local person_type = data.person_type ~= nil and string.upper(string.trim(data.person_type)) or existing.person_type
+    if person_type ~= "PF" and person_type ~= "PJ" then person_type = existing.person_type end
+    local role = data.role or existing.role
+    local document = data.document ~= nil and string.trim(data.document) or existing.document
+    local email = data.email ~= nil and string.trim(data.email) or existing.email
+    local phone = data.phone ~= nil and string.trim(data.phone) or existing.phone
+    local pix_key = data.pix_key ~= nil and string.trim(data.pix_key) or existing.pix_key
+    local notes = data.notes ~= nil and string.trim(data.notes) or existing.notes
+
+    self.db:exec(
+        `UPDATE people SET
+            name = ?, trade_name = ?, person_type = ?, role = ?, document = ?,
+            email = ?, phone = ?, pix_key = ?, notes = ?
+         WHERE id = ?`,
+        name, trade_name, person_type, role, document,
+        email, phone, pix_key, notes, id
+    )?
+    return self.db:row("SELECT * FROM people WHERE id = ?", id)
+end
+
+function Store.delete_person(self, id)
+    self.db:exec("UPDATE people SET active = 0 WHERE id = ?", id)?
     return {ok = true}
 end
 
@@ -760,9 +893,15 @@ function Store.list_transactions(self, filters)
         params[] = aid
     end
 
+    if filters.person_id ~= nil and tostring(filters.person_id) ~= "" and toint(filters.person_id) ~= nil and toint(filters.person_id) > 0 then
+        where[] = "t.person_id = ?"
+        params[] = toint(filters.person_id)
+    end
+
     if filters.search ~= nil and string.trim(filters.search) ~= "" then
         local q = "%" .. string.trim(filters.search) .. "%"
-        where[] = "(t.description LIKE ? OR t.contact LIKE ? OR t.notes LIKE ? OR t.tags LIKE ?)"
+        where[] = "(t.description LIKE ? OR t.contact LIKE ? OR t.notes LIKE ? OR t.tags LIKE ? OR p.name LIKE ?)"
+        params[] = q
         params[] = q
         params[] = q
         params[] = q
@@ -777,11 +916,15 @@ function Store.list_transactions(self, filters)
                c.icon AS category_icon,
                a.name AS account_name,
                a.color AS account_color,
-               da.name AS destination_account_name
+               da.name AS destination_account_name,
+               p.name AS person_name,
+               p.person_type AS person_type,
+               p.document AS person_document
         FROM transactions t
         LEFT JOIN categories c ON c.id = t.category_id
         LEFT JOIN accounts a ON a.id = t.account_id
         LEFT JOIN accounts da ON da.id = t.destination_account_id
+        LEFT JOIN people p ON p.id = t.person_id
         WHERE ${string.join(where, " AND ")}
         ORDER BY t.due_date ASC, t.id DESC
     `
@@ -860,10 +1003,17 @@ function Store.create_transaction(self, data)
     local category_id = toint(data.category_id)
     if category_id ~= nil and category_id <= 0 then category_id = nil end
 
+    local person_id = toint(data.person_id)
+    if person_id ~= nil and person_id <= 0 then person_id = nil end
+
     local discount = round2(data.discount or 0.0)
     local interest = round2(data.interest or 0.0)
     local payment_method = data.payment_method or "pix"
     local contact = string.trim(data.contact or "")
+    if person_id ~= nil and contact == "" then
+        local p_name = self.db:value("SELECT name FROM people WHERE id = ?", person_id)
+        if not is_error(p_name) and p_name ~= nil then contact = p_name end
+    end
     local notes = string.trim(data.notes or "")
     local tags = string.trim(data.tags or "")
     local bank_fitid = data.bank_fitid
@@ -879,11 +1029,11 @@ function Store.create_transaction(self, data)
             `INSERT INTO transactions (
                 description, amount, discount, interest, type, status,
                 due_date, payment_date, competence_date, account_id, destination_account_id,
-                category_id, payment_method, contact, notes, tags, bank_fitid, reconciled, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                category_id, person_id, payment_method, contact, notes, tags, bank_fitid, reconciled, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             desc, amount, discount, interest, tx_type, status,
             due_date, payment_date, competence_date, account_id, dest_account_id,
-            category_id, payment_method, contact, notes, tags, bank_fitid, reconciled, now
+            category_id, person_id, payment_method, contact, notes, tags, bank_fitid, reconciled, now
         )?
         local id = self.db:last_insert_id()
         return self.db:row("SELECT * FROM transactions WHERE id = ?", id)
@@ -900,12 +1050,12 @@ function Store.create_transaction(self, data)
                     `INSERT INTO transactions (
                         description, amount, discount, interest, type, status,
                         due_date, payment_date, competence_date, account_id, destination_account_id,
-                        category_id, payment_method, contact, notes, tags,
+                        category_id, person_id, payment_method, contact, notes, tags,
                         installment_group, installment_number, installment_total, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                     inst_desc, amount, (i == 1) and discount or 0.0, (i == 1) and interest or 0.0,
                     tx_type, inst_status, inst_due, inst_pay_date, competence_date,
-                    account_id, dest_account_id, category_id, payment_method,
+                    account_id, dest_account_id, category_id, person_id, payment_method,
                     contact, notes, tags, group_id, i, installments, now
                 )?
                 created_ids[] = db:last_insert_id()
@@ -950,6 +1100,12 @@ function Store.update_transaction(self, id, data)
         category_id = (cid ~= nil and cid > 0) and cid or nil
     end
 
+    local person_id = existing.person_id
+    if data.person_id ~= nil then
+        local pid = toint(data.person_id)
+        person_id = (pid ~= nil and pid > 0) and pid or nil
+    end
+
     local payment_method = data.payment_method or existing.payment_method
     local contact = data.contact ~= nil and string.trim(data.contact) or existing.contact
     local notes = data.notes ~= nil and string.trim(data.notes) or existing.notes
@@ -959,11 +1115,11 @@ function Store.update_transaction(self, id, data)
         `UPDATE transactions SET
             description = ?, amount = ?, discount = ?, interest = ?, type = ?, status = ?,
             due_date = ?, payment_date = ?, competence_date = ?, account_id = ?, destination_account_id = ?,
-            category_id = ?, payment_method = ?, contact = ?, notes = ?, tags = ?
+            category_id = ?, person_id = ?, payment_method = ?, contact = ?, notes = ?, tags = ?
          WHERE id = ?`,
         desc, amount, discount, interest, tx_type, status,
         due_date, payment_date, competence_date, account_id, dest_account_id,
-        category_id, payment_method, contact, notes, tags, id
+        category_id, person_id, payment_method, contact, notes, tags, id
     )?
     return self.db:row("SELECT * FROM transactions WHERE id = ?", id)
 end
@@ -1008,10 +1164,13 @@ function Store.list_recurring(self)
         SELECT r.*,
                c.name AS category_name,
                c.color AS category_color,
-               a.name AS account_name
+               a.name AS account_name,
+               p.name AS person_name,
+               p.person_type AS person_type
         FROM recurring_rules r
         LEFT JOIN categories c ON c.id = r.category_id
         LEFT JOIN accounts a ON a.id = r.account_id
+        LEFT JOIN people p ON p.id = r.person_id
         WHERE r.active = 1
         ORDER BY r.day_of_month ASC, r.description ASC
     `
@@ -1032,9 +1191,15 @@ function Store.create_recurring(self, data)
     end
     local category_id = toint(data.category_id)
     if category_id ~= nil and category_id <= 0 then category_id = nil end
+    local person_id = toint(data.person_id)
+    if person_id ~= nil and person_id <= 0 then person_id = nil end
 
     local payment_method = data.payment_method or "pix"
     local contact = string.trim(data.contact or "")
+    if person_id ~= nil and contact == "" then
+        local p_name = self.db:value("SELECT name FROM people WHERE id = ?", person_id)
+        if not is_error(p_name) and p_name ~= nil then contact = p_name end
+    end
     local notes = string.trim(data.notes or "")
     local frequency = data.frequency or "monthly"
     local day_of_month = toint(data.day_of_month) or 5
@@ -1046,10 +1211,10 @@ function Store.create_recurring(self, data)
 
     self.db:exec(
         `INSERT INTO recurring_rules (
-            description, amount, type, account_id, category_id, payment_method,
+            description, amount, type, account_id, category_id, person_id, payment_method,
             contact, notes, frequency, day_of_month, start_date, end_date, auto_pay, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        desc, amount, rtype, account_id, category_id, payment_method,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        desc, amount, rtype, account_id, category_id, person_id, payment_method,
         contact, notes, frequency, day_of_month, start_date, end_date, auto_pay, now_iso()
     )?
     local id = self.db:last_insert_id()
@@ -1070,6 +1235,11 @@ function Store.update_recurring(self, id, data)
     if account_id ~= nil and account_id <= 0 then account_id = nil end
     local category_id = data.category_id ~= nil and toint(data.category_id) or existing.category_id
     if category_id ~= nil and category_id <= 0 then category_id = nil end
+    local person_id = existing.person_id
+    if data.person_id ~= nil then
+        local pid = toint(data.person_id)
+        person_id = (pid ~= nil and pid > 0) and pid or nil
+    end
     local payment_method = data.payment_method or existing.payment_method
     local contact = data.contact ~= nil and string.trim(data.contact) or existing.contact
     local notes = data.notes ~= nil and string.trim(data.notes) or existing.notes
@@ -1081,11 +1251,11 @@ function Store.update_recurring(self, id, data)
 
     self.db:exec(
         `UPDATE recurring_rules SET
-            description = ?, amount = ?, type = ?, account_id = ?, category_id = ?,
+            description = ?, amount = ?, type = ?, account_id = ?, category_id = ?, person_id = ?,
             payment_method = ?, contact = ?, notes = ?, frequency = ?, day_of_month = ?,
             start_date = ?, end_date = ?, auto_pay = ?
          WHERE id = ?`,
-        desc, amount, rtype, account_id, category_id,
+        desc, amount, rtype, account_id, category_id, person_id,
         payment_method, contact, notes, frequency, day_of_month,
         start_date, end_date, auto_pay, id
     )?
@@ -1170,11 +1340,11 @@ function Store.generate_recurring_for_month(self, ym)
                             self.db:exec(
                                 `INSERT INTO transactions (
                                     description, amount, type, status, due_date, payment_date, competence_date,
-                                    account_id, category_id, payment_method, contact, notes,
+                                    account_id, category_id, person_id, payment_method, contact, notes,
                                     recurring_id, recurring_period, created_at
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                                 r.description, r.amount, r.type, st, due_str, pay_d, due_str,
-                                r.account_id, r.category_id, r.payment_method, r.contact, r.notes,
+                                r.account_id, r.category_id, r.person_id, r.payment_method, r.contact, r.notes,
                                 r.id, period_key, now
                             )?
                             generated += 1

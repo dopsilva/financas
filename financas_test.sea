@@ -55,6 +55,61 @@ t.describe("FinançasSea — Banco de Dados e Regras de Negócio", function()
         t.near(adj.current_balance, 2000.00, 0.01)
     end)
 
+    t.it("cadastra pessoas física (PF) e jurídica (PJ) sem e com documento e vincula contas a pagar e receber", function()
+        -- Pessoa Física sem documento (CPF opcional)
+        local pf = t.no_error(store:create_person({
+            name = "João da Silva",
+            person_type = "PF",
+            role = "cliente",
+            phone = "11988887777",
+        }))
+        t.eq(pf.name, "João da Silva")
+        t.eq(pf.person_type, "PF")
+        t.eq(pf.document, "")
+
+        -- Pessoa Jurídica com CNPJ
+        local pj = t.no_error(store:create_person({
+            name = "Cloud Hosting Brasil LTDA",
+            trade_name = "CloudBR",
+            person_type = "PJ",
+            role = "fornecedor",
+            document = "12.345.678/0001-99",
+        }))
+        t.eq(pj.person_type, "PJ")
+        t.eq(pj.document, "12.345.678/0001-99")
+
+        -- Vincula conta a receber à Pessoa Física e conta a pagar à Pessoa Jurídica
+        local tx_rec = t.no_error(store:create_transaction({
+            description = "Consultoria Técnica",
+            amount = 1800.00,
+            type = "income",
+            status = "pending",
+            due_date = "2026-10-15",
+            person_id = pf.id,
+        }))
+        t.eq(tx_rec.person_id, pf.id)
+
+        local tx_pag = t.no_error(store:create_transaction({
+            description = "Hospedagem Dedicada",
+            amount = 650.00,
+            type = "expense",
+            status = "pending",
+            due_date = "2026-10-20",
+            person_id = pj.id,
+        }))
+        t.eq(tx_pag.person_id, pj.id)
+
+        -- Filtra lançamentos por pessoa
+        local pf_txs = t.no_error(store:list_transactions({person_id = pf.id}))
+        t.eq(len(pf_txs), 1)
+        t.eq(pf_txs[0].person_name, "João da Silva")
+        t.eq(pf_txs[0].person_type, "PF")
+
+        -- Verifica totalizadores de contas a receber / pagar na listagem de pessoas
+        local people = t.no_error(store:list_people({}))
+        t.eq(len(people), 2)
+    end)
+
     t.it("lança contas a pagar e a receber por categoria e calcula saldos", function()
         local cats_inc = t.no_error(store:list_categories("income"))
         local cats_exp = t.no_error(store:list_categories("expense"))

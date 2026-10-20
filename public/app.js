@@ -4,6 +4,7 @@ const state = {
     currentMonth: getTodayYM(),
     activeTab: "dashboard",
     accounts: [],
+    people: [],
     categories: [],
     transactions: [],
     recurring: [],
@@ -140,13 +141,15 @@ function updateMonthDisplay() {
 
 async function refreshAll() {
     try {
-        const [accounts, categories, dash, cf] = await Promise.all([
+        const [accounts, people, categories, dash, cf] = await Promise.all([
             api("/api/accounts"),
+            api("/api/people"),
             api("/api/categories"),
             api(`/api/dashboard?month=${state.currentMonth}`),
             api(`/api/cashflow?mode=${state.cfMode}&month=${state.currentMonth}&account_id=${state.cfAccountId}`)
         ]);
         state.accounts = accounts;
+        state.people = people;
         state.categories = categories;
         state.dashboard = dash;
         state.cashflow = cf;
@@ -154,10 +157,13 @@ async function refreshAll() {
         populateSelects();
         renderSidebarAccounts();
         renderAccountsPage();
+        renderPeoplePage(state.people);
         renderDashboard();
         renderCashflow();
 
-        if (state.activeTab === "transactions") {
+        if (state.activeTab === "people") {
+            await loadPeople();
+        } else if (state.activeTab === "transactions") {
             await loadTransactions();
         } else if (state.activeTab === "recurring") {
             await loadRecurring();
@@ -183,6 +189,7 @@ function switchTab(tabName) {
     const titles = {
         dashboard: ["Visão Geral", "Resumo completo de saldos, contas a pagar/receber, orçamentos e metas"],
         accounts: ["Contas Bancárias, Carteiras e Cartões", "Cadastre seus bancos, agências, contas, chaves PIX, limites e acompanhe o saldo de cada instituição"],
+        people: ["Cadastro de Pessoas (Pessoa Física & Jurídica)", "Vincule suas contas a pagar e a receber a clientes, fornecedores, empresas ou pessoas (documento CPF/CNPJ opcional)"],
         transactions: ["Contas a Pagar e a Receber", "Gerencie todos os seus lançamentos, baixas, parcelamentos e transferências"],
         cashflow: ["Fluxo de Caixa (Realizado e Projetado)", "Acompanhe a evolução diária e mensal do seu saldo com projeção de contas pendentes"],
         recurring: ["Contas Recorrentes e Fixas", "Automação de salários, aluguéis, assinaturas e contas fixas mensais"],
@@ -194,6 +201,7 @@ function switchTab(tabName) {
     document.getElementById("page-subtitle").textContent = sub;
 
     if (tabName === "accounts") renderAccountsPage();
+    if (tabName === "people") loadPeople();
     if (tabName === "transactions") loadTransactions();
     if (tabName === "cashflow") loadCashflowOnly();
     if (tabName === "recurring") loadRecurring();
@@ -216,6 +224,23 @@ function populateSelects() {
     const curFilterAcc = document.getElementById("filter-account").value;
     document.getElementById("filter-account").innerHTML = accFilterOpts;
     document.getElementById("filter-account").value = curFilterAcc;
+
+    const peopleOpts = `<option value="0">— Sem pessoa vinculada —</option>` + state.people.map(p => {
+        const docInfo = p.document ? ` · ${esc(p.document)}` : "";
+        return `<option value="${p.id}">[${esc(p.person_type)}] ${esc(p.name)}${docInfo}</option>`;
+    }).join("");
+    const curTxPerson = document.getElementById("tx-person-id").value;
+    document.getElementById("tx-person-id").innerHTML = peopleOpts;
+    if (curTxPerson) document.getElementById("tx-person-id").value = curTxPerson;
+
+    const curRecPerson = document.getElementById("rec-person-id").value;
+    document.getElementById("rec-person-id").innerHTML = peopleOpts;
+    if (curRecPerson) document.getElementById("rec-person-id").value = curRecPerson;
+
+    const curFilterPerson = document.getElementById("filter-person").value;
+    document.getElementById("filter-person").innerHTML = `<option value="">Todas as Pessoas (PF/PJ)</option>` +
+        state.people.map(p => `<option value="${p.id}">[${esc(p.person_type)}] ${esc(p.name)}</option>`).join("");
+    document.getElementById("filter-person").value = curFilterPerson;
 
     const curCfAcc = document.getElementById("cf-account-filter").value;
     document.getElementById("cf-account-filter").innerHTML = `<option value="">Todas as Contas (Consolidado)</option>` + state.accounts.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join("");
@@ -366,6 +391,103 @@ function renderAccountsPage() {
                     <button class="btn btn-danger-soft btn-xs" onclick="deleteAccount(${a.id})">🗑</button>
                 </div>
             </div>
+        `;
+    }).join("");
+}
+
+const PERSON_ROLE_LABELS = {
+    ambos: "Cliente / Fornecedor",
+    cliente: "Cliente / Pagador",
+    fornecedor: "Fornecedor / Credor",
+    funcionario: "Funcionário / Prestador",
+    outro: "Outro"
+};
+
+async function loadPeople() {
+    try {
+        const search = document.getElementById("people-search") ? document.getElementById("people-search").value : "";
+        const pType = document.getElementById("people-filter-type") ? document.getElementById("people-filter-type").value : "all";
+        const role = document.getElementById("people-filter-role") ? document.getElementById("people-filter-role").value : "all";
+        const q = new URLSearchParams({ search, person_type: pType, role });
+        const rows = await api(`/api/people?${q.toString()}`);
+        renderPeoplePage(rows);
+    } catch (err) {
+        showToast(err.message, true);
+    }
+}
+
+function renderPeoplePage(rows) {
+    const tbody = document.getElementById("people-table-body");
+    if (!tbody) return;
+    const list = rows || state.people || [];
+
+    let pfCount = 0;
+    let pjCount = 0;
+    let recvPending = 0;
+    let payPending = 0;
+    (state.people || []).forEach(p => {
+        if (p.person_type === "PJ") pjCount += 1;
+        else pfCount += 1;
+        recvPending += Number(p.receivable_pending || 0);
+        payPending += Number(p.payable_pending || 0);
+    });
+
+    document.getElementById("ppl-kpi-total").textContent = (state.people || []).length;
+    document.getElementById("ppl-kpi-pf").textContent = pfCount;
+    document.getElementById("ppl-kpi-pj").textContent = pjCount;
+    document.getElementById("ppl-kpi-receivable").textContent = fmtBRL(recvPending);
+    document.getElementById("ppl-kpi-payable").textContent = fmtBRL(payPending);
+
+    if (!list.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="empty-state">Nenhuma pessoa cadastrada. Clique em "+ Cadastrar Pessoa (PF / PJ)" para começar (o documento CPF/CNPJ não é obrigatório).</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = list.map(p => {
+        const isPJ = p.person_type === "PJ";
+        const contactParts = [];
+        if (p.phone) contactParts.push(`📞 ${esc(p.phone)}`);
+        if (p.email) contactParts.push(`✉️ ${esc(p.email)}`);
+        if (p.pix_key) contactParts.push(`PIX: ${esc(p.pix_key)}`);
+
+        return `
+            <tr>
+                <td>
+                    <div class="tx-desc-main">
+                        <strong>${esc(p.name)}</strong>
+                        <span class="mini-tag">${esc(PERSON_ROLE_LABELS[p.role] || p.role)}</span>
+                    </div>
+                    ${p.trade_name ? `<div class="tx-desc-sub">Fantasia/Apelido: ${esc(p.trade_name)}</div>` : ""}
+                    ${p.notes ? `<div class="tx-desc-sub">📌 ${esc(p.notes)}</div>` : ""}
+                </td>
+                <td>
+                    <span class="badge ${isPJ ? "badge-info" : "badge-neutral"}">
+                        ${isPJ ? "🏢 PJ (Jurídica)" : "👤 PF (Física)"}
+                    </span>
+                </td>
+                <td>${p.document ? `<code>${esc(p.document)}</code>` : `<span class="text-muted">Não informado</span>`}</td>
+                <td>
+                    <div class="tx-desc-sub">${contactParts.length ? contactParts.join("<br>") : "—"}</div>
+                </td>
+                <td class="text-right">
+                    <div class="text-success"><strong>${fmtBRL(p.receivable_pending)}</strong> pend.</div>
+                    <div class="tx-desc-sub">Recebido: ${fmtBRL(p.received_paid)}</div>
+                </td>
+                <td class="text-right">
+                    <div class="text-danger"><strong>${fmtBRL(p.payable_pending)}</strong> pend.</div>
+                    <div class="tx-desc-sub">Pago: ${fmtBRL(p.paid_amount)}</div>
+                </td>
+                <td class="text-right">
+                    <span class="badge badge-neutral">${p.tx_count || 0} lanç.</span>
+                </td>
+                <td class="text-right">
+                    <div class="action-btns">
+                        <button class="btn btn-outline btn-xs" title="Ver lançamentos desta pessoa" onclick="viewPersonTransactions(${p.id})">📄 Contas</button>
+                        <button class="btn btn-outline btn-xs" title="Editar" onclick="openEditPerson(${p.id})">✎</button>
+                        <button class="btn btn-danger-soft btn-xs" title="Remover" onclick="deletePerson(${p.id})">🗑</button>
+                    </div>
+                </td>
+            </tr>
         `;
     }).join("");
 }
@@ -526,6 +648,7 @@ async function loadTransactions() {
         const search = document.getElementById("filter-search").value;
         const catId = document.getElementById("filter-category").value;
         const accId = document.getElementById("filter-account").value;
+        const personId = document.getElementById("filter-person") ? document.getElementById("filter-person").value : "";
         const typeVal = document.getElementById("filter-type").value;
         const statusVal = document.getElementById("filter-status").value;
 
@@ -534,6 +657,7 @@ async function loadTransactions() {
             search,
             category_id: catId,
             account_id: accId,
+            person_id: personId,
             type: typeVal,
             status: statusVal
         });
@@ -585,6 +709,11 @@ function renderTransactionsTable(rows) {
         }
 
         const extraBadges = [];
+        if (tx.person_name) {
+            const pIcon = tx.person_type === "PJ" ? "🏢" : "👤";
+            const pDoc = tx.person_document ? ` (${esc(tx.person_document)})` : "";
+            extraBadges.push(`<span class="mini-tag" style="color:#a78bfa" title="${esc(tx.person_type || "PF")}${pDoc}">${pIcon} ${esc(tx.person_name)} [${esc(tx.person_type || "PF")}]</span>`);
+        }
         if (tx.recurring_id) extraBadges.push(`<span class="mini-tag">↻ Fixa</span>`);
         if (tx.installment_total && tx.installment_total > 1) {
             extraBadges.push(`<span class="mini-tag">Parcela ${tx.installment_number}/${tx.installment_total}</span>`);
@@ -597,7 +726,7 @@ function renderTransactionsTable(rows) {
         }
 
         const subParts = [];
-        if (tx.contact) subParts.push(`Favorecido: ${esc(tx.contact)}`);
+        if (tx.contact) subParts.push(`Obs/Favorecido: ${esc(tx.contact)}`);
         if (tx.payment_date && tx.status === "paid") subParts.push(`Baixa em ${fmtDateBR(tx.payment_date)}`);
         if (tx.discount > 0) subParts.push(`Desc: ${fmtBRL(tx.discount)}`);
         if (tx.interest > 0) subParts.push(`Juros: ${fmtBRL(tx.interest)}`);
@@ -827,11 +956,14 @@ function renderRecurringTable(rows) {
 
     tbody.innerHTML = rows.map(r => {
         const isInc = r.type === "income";
+        const personBadge = r.person_name
+            ? `<span class="mini-tag" style="color:#a78bfa">${r.person_type === "PJ" ? "🏢" : "👤"} ${esc(r.person_name)} [${esc(r.person_type || "PF")}]</span>`
+            : "";
         return `
             <tr>
                 <td><strong>Dia ${r.day_of_month}</strong></td>
                 <td>
-                    <div class="tx-desc-main">${esc(r.description)}</div>
+                    <div class="tx-desc-main">${esc(r.description)} ${personBadge}</div>
                     ${r.contact ? `<div class="tx-desc-sub">${esc(r.contact)}</div>` : ""}
                 </td>
                 <td>
@@ -1067,6 +1199,7 @@ function openNewTxModal(defaultType = "expense") {
     handleTxTypeToggle(defaultType);
     document.getElementById("tx-due-date").value = `${state.currentMonth}-${getTodayISO().slice(8, 10)}`;
     document.getElementById("tx-status").value = "pending";
+    document.getElementById("tx-person-id").value = "0";
     document.getElementById("tx-installments-row").style.display = "grid";
     openModal("modal-tx");
 }
@@ -1096,6 +1229,7 @@ window.openEditTxModal = function(id) {
         document.getElementById("tx-category-id").value = tx.category_id;
     }
     document.getElementById("tx-payment-method").value = tx.payment_method || "pix";
+    document.getElementById("tx-person-id").value = tx.person_id || "0";
     document.getElementById("tx-contact").value = tx.contact || "";
     document.getElementById("tx-discount").value = tx.discount || 0;
     document.getElementById("tx-interest").value = tx.interest || 0;
@@ -1179,6 +1313,7 @@ window.openEditRecurring = function(id) {
     populateRecCategorySelect(r.type);
     document.getElementById("rec-category-id").value = r.category_id || "";
     document.getElementById("rec-account-id").value = r.account_id || "";
+    document.getElementById("rec-person-id").value = r.person_id || "0";
     document.getElementById("rec-frequency").value = r.frequency || "monthly";
     document.getElementById("rec-day").value = r.day_of_month || 5;
     document.getElementById("rec-start-date").value = r.start_date || getTodayISO();
@@ -1186,6 +1321,60 @@ window.openEditRecurring = function(id) {
     document.getElementById("rec-auto-pay").value = r.auto_pay ? "1" : "0";
     document.getElementById("rec-contact").value = r.contact || "";
     openModal("modal-recurring");
+};
+
+function updatePersonModalLabels(pType) {
+    const isPJ = pType === "PJ";
+    document.getElementById("person-name-label").textContent = isPJ
+        ? "Razão Social / Nome da Empresa *"
+        : "Nome Completo *";
+    document.getElementById("person-doc-label").textContent = isPJ
+        ? "CNPJ (Opcional — não é obrigatório)"
+        : "CPF (Opcional — não é obrigatório)";
+}
+
+window.openNewPersonModal = function() {
+    document.getElementById("modal-person-title").textContent = "Cadastrar Pessoa (Física ou Jurídica)";
+    document.getElementById("person-id").value = "";
+    document.getElementById("form-person").reset();
+    document.getElementById("person-type").value = "PF";
+    document.getElementById("person-role").value = "ambos";
+    updatePersonModalLabels("PF");
+    openModal("modal-person");
+};
+
+window.openEditPerson = function(id) {
+    const p = state.people.find(x => x.id === id);
+    if (!p) return;
+    document.getElementById("modal-person-title").textContent = `Editar Pessoa: ${p.name}`;
+    document.getElementById("person-id").value = p.id;
+    document.getElementById("person-type").value = p.person_type || "PF";
+    updatePersonModalLabels(p.person_type || "PF");
+    document.getElementById("person-role").value = p.role || "ambos";
+    document.getElementById("person-name").value = p.name || "";
+    document.getElementById("person-trade-name").value = p.trade_name || "";
+    document.getElementById("person-document").value = p.document || "";
+    document.getElementById("person-phone").value = p.phone || "";
+    document.getElementById("person-email").value = p.email || "";
+    document.getElementById("person-pix-key").value = p.pix_key || "";
+    document.getElementById("person-notes").value = p.notes || "";
+    openModal("modal-person");
+};
+
+window.deletePerson = async function(id) {
+    if (!confirm("Deseja remover este cadastro de pessoa?")) return;
+    try {
+        await api(`/api/people/${id}`, { method: "DELETE" });
+        showToast("Pessoa removida.");
+        await refreshAll();
+    } catch (err) {
+        showToast(err.message, true);
+    }
+};
+
+window.viewPersonTransactions = function(personId) {
+    document.getElementById("filter-person").value = String(personId);
+    switchTab("transactions");
 };
 
 window.deleteRecurring = async function(id) {
@@ -1396,6 +1585,7 @@ function setupEventListeners() {
             account_id: Number(document.getElementById("tx-account-id").value),
             destination_account_id: Number(document.getElementById("tx-dest-account-id").value),
             category_id: Number(document.getElementById("tx-category-id").value),
+            person_id: Number(document.getElementById("tx-person-id").value || 0),
             payment_method: document.getElementById("tx-payment-method").value,
             contact: document.getElementById("tx-contact").value,
             discount: Number(document.getElementById("tx-discount").value || 0),
@@ -1463,9 +1653,9 @@ function setupEventListeners() {
         });
     });
 
-    ["filter-search", "filter-category", "filter-account", "filter-type", "filter-status"].forEach(id => {
+    ["filter-search", "filter-category", "filter-account", "filter-person", "filter-type", "filter-status"].forEach(id => {
         const el = document.getElementById(id);
-        el.addEventListener(id === "filter-search" ? "input" : "change", () => loadTransactions());
+        if (el) el.addEventListener(id === "filter-search" ? "input" : "change", () => loadTransactions());
     });
 
     document.getElementById("btn-export-csv").addEventListener("click", () => {
@@ -1494,6 +1684,7 @@ function setupEventListeners() {
         document.getElementById("rec-id").value = "";
         document.getElementById("form-recurring").reset();
         document.getElementById("rec-start-date").value = `${state.currentMonth}-01`;
+        document.getElementById("rec-person-id").value = "0";
         populateRecCategorySelect("expense");
         openModal("modal-recurring");
     });
@@ -1509,6 +1700,7 @@ function setupEventListeners() {
             day_of_month: Number(document.getElementById("rec-day").value),
             category_id: Number(document.getElementById("rec-category-id").value),
             account_id: Number(document.getElementById("rec-account-id").value),
+            person_id: Number(document.getElementById("rec-person-id").value || 0),
             start_date: document.getElementById("rec-start-date").value,
             end_date: document.getElementById("rec-end-date").value,
             auto_pay: Number(document.getElementById("rec-auto-pay").value),
@@ -1633,6 +1825,49 @@ function setupEventListeners() {
             document.getElementById("rule-keyword").value = "";
             showToast("Regra de auto-categorização criada!");
             await loadRules();
+        } catch (err) {
+            showToast(err.message, true);
+        }
+    });
+
+    // People (PF / PJ) buttons & form
+    document.getElementById("btn-page-new-person").addEventListener("click", () => window.openNewPersonModal());
+    document.getElementById("btn-quick-person-tx").addEventListener("click", () => window.openNewPersonModal());
+    document.getElementById("person-type").addEventListener("change", e => updatePersonModalLabels(e.target.value));
+
+    ["people-search", "people-filter-type", "people-filter-role"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener(id === "people-search" ? "input" : "change", () => loadPeople());
+    });
+
+    document.getElementById("form-person").addEventListener("submit", async e => {
+        e.preventDefault();
+        const id = document.getElementById("person-id").value;
+        const body = {
+            person_type: document.getElementById("person-type").value,
+            role: document.getElementById("person-role").value,
+            name: document.getElementById("person-name").value,
+            trade_name: document.getElementById("person-trade-name").value,
+            document: document.getElementById("person-document").value,
+            phone: document.getElementById("person-phone").value,
+            email: document.getElementById("person-email").value,
+            pix_key: document.getElementById("person-pix-key").value,
+            notes: document.getElementById("person-notes").value
+        };
+        try {
+            let saved = null;
+            if (id) {
+                saved = await api(`/api/people/${id}`, { method: "PUT", body });
+                showToast("Cadastro de pessoa atualizado!");
+            } else {
+                saved = await api("/api/people", { method: "POST", body });
+                showToast("Pessoa cadastrada com sucesso!");
+            }
+            closeModal("modal-person");
+            await refreshAll();
+            if (saved && saved.id && document.getElementById("modal-tx").style.display === "flex") {
+                document.getElementById("tx-person-id").value = String(saved.id);
+            }
         } catch (err) {
             showToast(err.message, true);
         }
