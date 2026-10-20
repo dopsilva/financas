@@ -3,7 +3,7 @@
 
 local flags = require("sea/flags")
 local log = require("sea/log")
-local http = require("../sea_vm/libs/http/http")
+local http = require("http/http")
 local db_mod = require("./db")
 local server_mod = require("./server")
 

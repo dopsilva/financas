@@ -1,6 +1,6 @@
 -- server.sea — Servidor HTTP e API REST JSON para o Sistema de Gestão Financeira Pessoal
 
-local http = require("../sea_vm/libs/http/http")
+local http = require("http/http")
 local reports = require("./reports")
 local importer = require("./importer")
 

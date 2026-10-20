@@ -1,6 +1,6 @@
 -- db.sea — Camada de banco de dados SQLite e regras de negócio financeiras
 
-local sqlite = require("../sea_vm/libs/sqlite/sqlite")
+local sqlite = require("sqlite/sqlite")
 
 local M = {}
 

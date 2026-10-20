@@ -1,7 +1,7 @@
 -- financas_test.sea — Suíte de testes automatizados do Sistema de Gestão Financeira Pessoal
 
 local t = require("sea/test")
-local http = require("../sea_vm/libs/http/http")
+local http = require("http/http")
 local db_mod = require("./db")
 local reports = require("./reports")
 local importer = require("./importer")
