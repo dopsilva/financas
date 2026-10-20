@@ -289,26 +289,26 @@
                         <div class="kpi-card">
                             <div class="kpi-header">
                                 <span class="kpi-label">Total de Pessoas</span>
-                                <span class="kpi-badge">Cadastros</span>
+                                <span class="kpi-badge">PF: <span id="ppl-kpi-pf">0</span> · PJ: <span id="ppl-kpi-pj">0</span></span>
                             </div>
                             <div class="kpi-value" id="ppl-kpi-total">0</div>
                             <div class="kpi-sub">Clientes, fornecedores, empresas e contatos</div>
                         </div>
                         <div class="kpi-card">
                             <div class="kpi-header">
-                                <span class="kpi-label">Pessoas Físicas (PF)</span>
-                                <span class="kpi-badge">CPF Opcional</span>
+                                <span class="kpi-label">A Receber de Pessoas</span>
+                                <span class="kpi-badge">Pendente</span>
                             </div>
-                            <div class="kpi-value text-info" id="ppl-kpi-pf">0</div>
-                            <div class="kpi-sub">Pessoas físicas cadastradas</div>
+                            <div class="kpi-value text-success" id="ppl-kpi-receivable">R$ 0,00</div>
+                            <div class="kpi-sub">Contas a receber em aberto vinculadas a pessoas</div>
                         </div>
                         <div class="kpi-card">
                             <div class="kpi-header">
-                                <span class="kpi-label">Pessoas Jurídicas (PJ)</span>
-                                <span class="kpi-badge">CNPJ Opcional</span>
+                                <span class="kpi-label">A Pagar para Pessoas</span>
+                                <span class="kpi-badge">Pendente</span>
                             </div>
-                            <div class="kpi-value text-success" id="ppl-kpi-pj">0</div>
-                            <div class="kpi-sub">Empresas e fornecedores cadastrados</div>
+                            <div class="kpi-value text-danger" id="ppl-kpi-payable">R$ 0,00</div>
+                            <div class="kpi-sub">Contas a pagar em aberto vinculadas a pessoas</div>
                         </div>
                         <div class="kpi-card">
                             <div class="kpi-header">
@@ -327,19 +327,29 @@
                                 <p class="card-desc">Cadastre clientes, fornecedores, prestadores ou empresas (CPF/CNPJ não é obrigatório) e vincule às suas contas a pagar e a receber.</p>
                             </div>
                             <div class="header-btns">
-                                <button class="btn btn-primary" id="btn-new-person">+ Cadastrar Pessoa (PF / PJ)</button>
+                                <button class="btn btn-primary" id="btn-new-person" onclick="openNewPersonModal()">+ Cadastrar Pessoa (PF / PJ)</button>
                             </div>
                         </div>
 
-                        <div class="tx-filters-bar" style="grid-template-columns: 2fr 1fr;">
+                        <div class="tx-filters-bar" style="grid-template-columns: 2fr 1fr 1fr;">
                             <div class="filter-group">
                                 <input type="text" id="people-search" class="form-input" placeholder="🔍 Buscar por nome, razão social, CPF/CNPJ, e-mail ou telefone..." />
                             </div>
                             <div class="filter-group">
-                                <select id="people-type-filter" class="form-select">
-                                    <option value="all">Tipo: Todos (PF e PJ)</option>
+                                <select id="people-filter-type" class="form-select">
+                                    <option value="all">Natureza: Todas (PF e PJ)</option>
                                     <option value="PF">Pessoa Física (PF)</option>
                                     <option value="PJ">Pessoa Jurídica (PJ)</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <select id="people-filter-role" class="form-select">
+                                    <option value="all">Papel: Todos</option>
+                                    <option value="cliente">Cliente / Pagador</option>
+                                    <option value="fornecedor">Fornecedor / Credor</option>
+                                    <option value="funcionario">Funcionário / Prestador</option>
+                                    <option value="ambos">Ambos (Cliente e Fornecedor)</option>
+                                    <option value="outro">Outro</option>
                                 </select>
                             </div>
                         </div>
@@ -349,13 +359,12 @@
                                 <thead>
                                     <tr>
                                         <th>Nome / Razão Social</th>
-                                        <th>Tipo / Papel</th>
-                                        <th>Documento (CPF/CNPJ)</th>
+                                        <th>Natureza (PF/PJ)</th>
+                                        <th>Documento (Opcional)</th>
                                         <th>Contato / PIX</th>
-                                        <th class="text-right">A Pagar (Pend.)</th>
-                                        <th class="text-right">Pago</th>
-                                        <th class="text-right">A Receber (Pend.)</th>
-                                        <th class="text-right">Recebido</th>
+                                        <th class="text-right">A Receber / Recebido</th>
+                                        <th class="text-right">A Pagar / Pago</th>
+                                        <th class="text-right">Vínculos</th>
                                         <th class="text-right">Ações</th>
                                     </tr>
                                 </thead>
@@ -796,10 +805,10 @@
                         <div class="form-group">
                             <div style="display:flex; justify-content:space-between; align-items:center;">
                                 <label class="form-label">Pessoa (PF / PJ)</label>
-                                <button type="button" class="btn-sidebar-add" id="btn-quick-person-tx" title="Cadastrar nova pessoa">+ Pessoa</button>
+                                <button type="button" class="btn-sidebar-add" id="btn-quick-person-tx" onclick="openNewPersonModal()" title="Cadastrar nova pessoa">+ Pessoa</button>
                             </div>
                             <select id="tx-person-id" class="form-select">
-                                <option value="">— Nenhuma pessoa —</option>
+                                <option value="0">— Sem pessoa vinculada —</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -1154,14 +1163,14 @@
                 <div class="modal-body">
                     <div class="form-grid-3">
                         <div class="form-group span-2">
-                            <label class="form-label">Nome Completo ou Razão Social *</label>
+                            <label class="form-label" id="person-name-label">Nome Completo ou Razão Social *</label>
                             <input type="text" id="person-name" class="form-input" placeholder="Ex: João da Silva, Imobiliária Central Ltda..." required />
                         </div>
                         <div class="form-group">
                             <label class="form-label">Natureza Jurídica *</label>
                             <select id="person-type" class="form-select">
-                                <option value="PF">Pessoa Física (PF)</option>
-                                <option value="PJ">Pessoa Jurídica (PJ)</option>
+                                <option value="PF">👤 Pessoa Física (PF)</option>
+                                <option value="PJ">🏢 Pessoa Jurídica (PJ)</option>
                             </select>
                         </div>
                     </div>
@@ -1172,16 +1181,17 @@
                             <input type="text" id="person-trade-name" class="form-input" placeholder="Ex: Imobiliária Central" />
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Documento CPF / CNPJ (Não obrigatório)</label>
+                            <label class="form-label" id="person-doc-label">Documento CPF / CNPJ (Opcional — não obrigatório)</label>
                             <input type="text" id="person-document" class="form-input" placeholder="Opcional: 000.000.000-00 ou CNPJ" />
                         </div>
                         <div class="form-group">
                             <label class="form-label">Relação / Papel</label>
                             <select id="person-role" class="form-select">
-                                <option value="both">Cliente e Fornecedor</option>
-                                <option value="supplier">Fornecedor / Credor (A Pagar)</option>
-                                <option value="client">Cliente / Pagador (A Receber)</option>
-                                <option value="other">Outro / Familiar / Funcionário</option>
+                                <option value="ambos">Cliente e Fornecedor</option>
+                                <option value="fornecedor">Fornecedor / Credor (A Pagar)</option>
+                                <option value="cliente">Cliente / Pagador (A Receber)</option>
+                                <option value="funcionario">Funcionário / Prestador</option>
+                                <option value="outro">Outro / Familiar</option>
                             </select>
                         </div>
                     </div>
@@ -1197,7 +1207,7 @@
                         </div>
                         <div class="form-group">
                             <label class="form-label">Chave PIX (Para Pagamentos)</label>
-                            <input type="text" id="person-pix" class="form-input" placeholder="CPF, CNPJ, E-mail, Celular..." />
+                            <input type="text" id="person-pix-key" class="form-input" placeholder="CPF, CNPJ, E-mail, Celular..." />
                         </div>
                     </div>
 

@@ -432,11 +432,16 @@ function renderPeoplePage(rows) {
         payPending += Number(p.payable_pending || 0);
     });
 
-    document.getElementById("ppl-kpi-total").textContent = (state.people || []).length;
-    document.getElementById("ppl-kpi-pf").textContent = pfCount;
-    document.getElementById("ppl-kpi-pj").textContent = pjCount;
-    document.getElementById("ppl-kpi-receivable").textContent = fmtBRL(recvPending);
-    document.getElementById("ppl-kpi-payable").textContent = fmtBRL(payPending);
+    const setTxt = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+    };
+    setTxt("ppl-kpi-total", (state.people || []).length);
+    setTxt("ppl-kpi-pf", pfCount);
+    setTxt("ppl-kpi-pj", pjCount);
+    setTxt("ppl-kpi-receivable", fmtBRL(recvPending));
+    setTxt("ppl-kpi-payable", fmtBRL(payPending));
+    setTxt("ppl-kpi-pending", fmtBRL(recvPending + payPending));
 
     if (!list.length) {
         tbody.innerHTML = `<tr><td colspan="8" class="empty-state">Nenhuma pessoa cadastrada. Clique em "+ Cadastrar Pessoa (PF / PJ)" para começar (o documento CPF/CNPJ não é obrigatório).</td></tr>`;
@@ -1325,16 +1330,23 @@ window.openEditRecurring = function(id) {
 
 function updatePersonModalLabels(pType) {
     const isPJ = pType === "PJ";
-    document.getElementById("person-name-label").textContent = isPJ
-        ? "Razão Social / Nome da Empresa *"
-        : "Nome Completo *";
-    document.getElementById("person-doc-label").textContent = isPJ
-        ? "CNPJ (Opcional — não é obrigatório)"
-        : "CPF (Opcional — não é obrigatório)";
+    const nameLbl = document.getElementById("person-name-label");
+    if (nameLbl) {
+        nameLbl.textContent = isPJ
+            ? "Razão Social / Nome da Empresa *"
+            : "Nome Completo *";
+    }
+    const docLbl = document.getElementById("person-doc-label");
+    if (docLbl) {
+        docLbl.textContent = isPJ
+            ? "CNPJ (Opcional — não é obrigatório)"
+            : "CPF (Opcional — não é obrigatório)";
+    }
 }
 
 window.openNewPersonModal = function() {
-    document.getElementById("modal-person-title").textContent = "Cadastrar Pessoa (Física ou Jurídica)";
+    const titleEl = document.getElementById("modal-person-title");
+    if (titleEl) titleEl.textContent = "Cadastrar Pessoa (Física ou Jurídica)";
     document.getElementById("person-id").value = "";
     document.getElementById("form-person").reset();
     document.getElementById("person-type").value = "PF";
@@ -1346,7 +1358,8 @@ window.openNewPersonModal = function() {
 window.openEditPerson = function(id) {
     const p = state.people.find(x => x.id === id);
     if (!p) return;
-    document.getElementById("modal-person-title").textContent = `Editar Pessoa: ${p.name}`;
+    const titleEl = document.getElementById("modal-person-title");
+    if (titleEl) titleEl.textContent = `Editar Pessoa: ${p.name}`;
     document.getElementById("person-id").value = p.id;
     document.getElementById("person-type").value = p.person_type || "PF";
     updatePersonModalLabels(p.person_type || "PF");
@@ -1356,7 +1369,8 @@ window.openEditPerson = function(id) {
     document.getElementById("person-document").value = p.document || "";
     document.getElementById("person-phone").value = p.phone || "";
     document.getElementById("person-email").value = p.email || "";
-    document.getElementById("person-pix-key").value = p.pix_key || "";
+    const pixInput = document.getElementById("person-pix-key") || document.getElementById("person-pix");
+    if (pixInput) pixInput.value = p.pix_key || "";
     document.getElementById("person-notes").value = p.notes || "";
     openModal("modal-person");
 };
@@ -1831,47 +1845,56 @@ function setupEventListeners() {
     });
 
     // People (PF / PJ) buttons & form
-    document.getElementById("btn-page-new-person").addEventListener("click", () => window.openNewPersonModal());
-    document.getElementById("btn-quick-person-tx").addEventListener("click", () => window.openNewPersonModal());
-    document.getElementById("person-type").addEventListener("change", e => updatePersonModalLabels(e.target.value));
+    ["btn-new-person", "btn-page-new-person", "btn-quick-person-tx"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener("click", () => window.openNewPersonModal());
+    });
+    const personTypeSel = document.getElementById("person-type");
+    if (personTypeSel) {
+        personTypeSel.addEventListener("change", e => updatePersonModalLabels(e.target.value));
+    }
 
-    ["people-search", "people-filter-type", "people-filter-role"].forEach(id => {
+    ["people-search", "people-filter-type", "people-type-filter", "people-filter-role"].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener(id === "people-search" ? "input" : "change", () => loadPeople());
     });
 
-    document.getElementById("form-person").addEventListener("submit", async e => {
-        e.preventDefault();
-        const id = document.getElementById("person-id").value;
-        const body = {
-            person_type: document.getElementById("person-type").value,
-            role: document.getElementById("person-role").value,
-            name: document.getElementById("person-name").value,
-            trade_name: document.getElementById("person-trade-name").value,
-            document: document.getElementById("person-document").value,
-            phone: document.getElementById("person-phone").value,
-            email: document.getElementById("person-email").value,
-            pix_key: document.getElementById("person-pix-key").value,
-            notes: document.getElementById("person-notes").value
-        };
-        try {
-            let saved = null;
-            if (id) {
-                saved = await api(`/api/people/${id}`, { method: "PUT", body });
-                showToast("Cadastro de pessoa atualizado!");
-            } else {
-                saved = await api("/api/people", { method: "POST", body });
-                showToast("Pessoa cadastrada com sucesso!");
+    const formPerson = document.getElementById("form-person");
+    if (formPerson) {
+        formPerson.addEventListener("submit", async e => {
+            e.preventDefault();
+            const id = document.getElementById("person-id").value;
+            const pixInput = document.getElementById("person-pix-key") || document.getElementById("person-pix");
+            const body = {
+                person_type: document.getElementById("person-type").value,
+                role: document.getElementById("person-role").value,
+                name: document.getElementById("person-name").value,
+                trade_name: document.getElementById("person-trade-name").value,
+                document: document.getElementById("person-document").value,
+                phone: document.getElementById("person-phone").value,
+                email: document.getElementById("person-email").value,
+                pix_key: pixInput ? pixInput.value : "",
+                notes: document.getElementById("person-notes").value
+            };
+            try {
+                let saved = null;
+                if (id) {
+                    saved = await api(`/api/people/${id}`, { method: "PUT", body });
+                    showToast("Cadastro de pessoa atualizado!");
+                } else {
+                    saved = await api("/api/people", { method: "POST", body });
+                    showToast("Pessoa cadastrada com sucesso!");
+                }
+                closeModal("modal-person");
+                await refreshAll();
+                if (saved && saved.id && document.getElementById("modal-tx").style.display === "flex") {
+                    document.getElementById("tx-person-id").value = String(saved.id);
+                }
+            } catch (err) {
+                showToast(err.message, true);
             }
-            closeModal("modal-person");
-            await refreshAll();
-            if (saved && saved.id && document.getElementById("modal-tx").style.display === "flex") {
-                document.getElementById("tx-person-id").value = String(saved.id);
-            }
-        } catch (err) {
-            showToast(err.message, true);
-        }
-    });
+        });
+    }
 
     // Account creation & preset buttons
     document.getElementById("btn-new-account").addEventListener("click", () => window.openNewAccountModal());
