@@ -1,0 +1,241 @@
+-- financas_test.sea — Suíte de testes automatizados do Sistema de Gestão Financeira Pessoal
+
+local t = require("sea/test")
+local http = require("../sea_vm/libs/http/http")
+local db_mod = require("./db")
+local reports = require("./reports")
+local importer = require("./importer")
+local server_mod = require("./server")
+
+t.describe("FinançasSea — Banco de Dados e Regras de Negócio", function()
+    local store = nil
+
+    t.before_each(function()
+        store = t.no_error(db_mod.open(":memory:"))
+    end)
+
+    t.after_each(function()
+        if store ~= nil then store:close() end
+    end)
+
+    t.it("inicia o banco de dados zerado sem lançamentos ou contas pré-populados", function()
+        local accs = t.no_error(store:list_accounts())
+        local txs = t.no_error(store:list_transactions({}))
+        local recs = t.no_error(store:list_recurring())
+        local goals = t.no_error(store:list_goals())
+        t.eq(len(accs), 0)
+        t.eq(len(txs), 0)
+        t.eq(len(recs), 0)
+        t.eq(len(goals), 0)
+    end)
+
+    t.it("cadastra, edita e ajusta saldo de contas bancárias com agência, conta e PIX", function()
+        local acc = t.no_error(store:create_account({
+            name = "Conta Itaú Uniclass",
+            type = "checking",
+            institution = "Itaú Unibanco",
+            bank_code = "341",
+            branch = "1234",
+            account_number = "56789-0",
+            pix_key = "11999999999",
+            initial_balance = 1500.00,
+            credit_limit = 4000.00,
+            color = "#f97316",
+        }))
+        t.eq(acc.name, "Conta Itaú Uniclass")
+        t.eq(acc.bank_code, "341")
+        t.eq(acc.branch, "1234")
+        t.eq(acc.account_number, "56789-0")
+        t.eq(acc.pix_key, "11999999999")
+        t.near(acc.initial_balance, 1500.00, 0.01)
+
+        -- Ajusta saldo para 2000.00 (cria lançamento automático de +500.00)
+        local adj = t.no_error(store:adjust_account_balance(acc.id, 2000.00, "Ajuste Inicial"))
+        t.near(adj.adjusted, 500.00, 0.01)
+        t.near(adj.current_balance, 2000.00, 0.01)
+    end)
+
+    t.it("lança contas a pagar e a receber por categoria e calcula saldos", function()
+        local cats_inc = t.no_error(store:list_categories("income"))
+        local cats_exp = t.no_error(store:list_categories("expense"))
+        t.gt(len(cats_inc), 0)
+        t.gt(len(cats_exp), 0)
+
+        local created_acc = t.no_error(store:create_account({
+            name = "Conta Principal",
+            type = "checking",
+            initial_balance = 1000.00,
+        }))
+        local acc_id = created_acc.id
+        local base_bal = created_acc.initial_balance
+
+        -- Cria receita recebida
+        local tx_inc = t.no_error(store:create_transaction({
+            description = "Projeto Web",
+            amount = 3000.00,
+            type = "income",
+            status = "paid",
+            due_date = "2026-10-10",
+            account_id = acc_id,
+            category_id = cats_inc[0].id,
+        }))
+        t.eq(tx_inc.status, "paid")
+
+        -- Cria conta a pagar pendente
+        local tx_exp = t.no_error(store:create_transaction({
+            description = "Servidor Cloud",
+            amount = 450.00,
+            type = "expense",
+            status = "pending",
+            due_date = "2026-10-20",
+            account_id = acc_id,
+            category_id = cats_exp[0].id,
+        }))
+        t.eq(tx_exp.status, "pending")
+
+        -- Saldo realizado considera apenas pagos; projetado considera pendentes
+        local cur_bal = t.no_error(store:account_balance(acc_id, false))
+        local proj_bal = t.no_error(store:account_balance(acc_id, true))
+        t.near(cur_bal, base_bal + 3000.00, 0.01)
+        t.near(proj_bal, base_bal + 3000.00 - 450.00, 0.01)
+
+        -- Dá baixa na conta a pagar com desconto de 50.00
+        local paid_tx = t.no_error(store:pay_transaction(tx_exp.id, {
+            payment_date = "2026-10-19",
+            discount = 50.00,
+            interest = 0.0,
+        }))
+        t.eq(paid_tx.status, "paid")
+        local cur_bal_after = t.no_error(store:account_balance(acc_id, false))
+        t.near(cur_bal_after, base_bal + 3000.00 - 400.00, 0.01)
+    end)
+
+    t.it("gera parcelamentos automaticamente em múltiplos meses", function()
+        local tx1 = t.no_error(store:create_transaction({
+            description = "Notebook Novo",
+            amount = 500.00,
+            type = "expense",
+            status = "paid",
+            due_date = "2026-10-15",
+            installments = 3,
+        }))
+        t.eq(tx1.installment_number, 1)
+        t.eq(tx1.installment_total, 3)
+
+        local all_tx = t.no_error(store:list_transactions({}))
+        t.eq(len(all_tx), 3)
+        t.eq(all_tx[0].due_date, "2026-10-15")
+        t.eq(all_tx[0].status, "paid")
+        t.eq(all_tx[1].due_date, "2026-11-15")
+        t.eq(all_tx[1].status, "pending")
+        t.eq(all_tx[2].due_date, "2026-12-15")
+        t.eq(all_tx[2].status, "pending")
+    end)
+
+    t.it("gera contas recorrentes de forma idempotente", function()
+        local rec = t.no_error(store:create_recurring({
+            description = "Aluguel Mensal",
+            amount = 2100.00,
+            type = "expense",
+            frequency = "monthly",
+            day_of_month = 10,
+            start_date = "2026-10-01",
+        }))
+        t.eq(rec.description, "Aluguel Mensal")
+
+        -- Ao criar já materializa para 2026-10; rodar novamente não duplica
+        local gen2 = t.no_error(store:generate_recurring_for_month("2026-10"))
+        t.eq(gen2.generated, 0)
+
+        -- Para o mês seguinte gera 1 ocorrência
+        local gen_nov = t.no_error(store:generate_recurring_for_month("2026-11"))
+        t.eq(gen_nov.generated, 1)
+    end)
+
+    t.it("calcula o fluxo de caixa diário e mensal (realizado vs projetado)", function()
+        t.no_error(store:create_transaction({
+            description = "Receita Dia 05",
+            amount = 5000.00,
+            type = "income",
+            status = "paid",
+            due_date = "2026-10-05",
+        }))
+        t.no_error(store:create_transaction({
+            description = "Despesa Pendente Dia 20",
+            amount = 1200.00,
+            type = "expense",
+            status = "pending",
+            due_date = "2026-10-20",
+        }))
+
+        local cf = t.no_error(reports.get_cashflow(store, {mode = "daily", month = "2026-10"}))
+        t.eq(cf.mode, "daily")
+        t.eq(len(cf.series), 31)
+        t.near(cf.summary.total_inflows_paid, 5000.00, 0.01)
+        t.near(cf.summary.total_outflows_pending, 1200.00, 0.01)
+
+        local mcf = t.no_error(reports.get_cashflow(store, {mode = "monthly", month = "2026-10", months = 6}))
+        t.eq(mcf.mode, "monthly")
+        t.eq(len(mcf.series), 6)
+    end)
+
+    t.it("importa extrato OFX e CSV com categorização automática e conciliação", function()
+        -- Cria uma conta a pagar pendente de R$ 2200,00 no dia 2026-10-06 (Aluguel)
+        local pending_rent = t.no_error(store:create_transaction({
+            description = "Aluguel Apartamento",
+            amount = 2200.00,
+            type = "expense",
+            status = "pending",
+            due_date = "2026-10-06",
+        }))
+
+        local ofx_text = importer.sample_ofx("2026-10")
+        local preview = t.no_error(importer.preview_statement(store, ofx_text, "extrato.ofx", 1))
+        t.eq(preview.format, "OFX")
+        t.eq(preview.total_found, 8)
+        t.ge(preview.reconcile_count, 1)
+
+        -- Confirma importação + conciliação
+        local commit_res = t.no_error(importer.commit_statement(store, {
+            account_id = 1,
+            items = preview.items,
+        }))
+        t.ge(commit_res.reconciled, 1)
+        t.ge(commit_res.imported, 1)
+
+        -- Verifica que o aluguel pendente foi baixado e conciliado
+        local updated_rent = t.no_error(store.db:row("SELECT * FROM transactions WHERE id = ?", pending_rent.id))
+        t.eq(updated_rent.status, "paid")
+        t.eq(updated_rent.reconciled, 1)
+
+        -- Se importar o mesmo OFX novamente, todas são detectadas como duplicadas
+        local preview_dup = t.no_error(importer.preview_statement(store, ofx_text, "extrato.ofx", 1))
+        t.eq(preview_dup.duplicate_count, 8)
+
+        -- Testa também o parser CSV
+        local csv_text = importer.sample_csv("2026-10")
+        local csv_prev = t.no_error(importer.preview_statement(store, csv_text, "extrato.csv", 1))
+        t.eq(csv_prev.format, "CSV")
+        t.eq(csv_prev.total_found, 7)
+    end)
+
+    t.it("serve a API HTTP REST e o frontend web", function()
+        local router = server_mod.build_router(store, "public")
+        local srv = t.no_error(http.listen(0, router, {quiet = true}))
+        defer srv.close()
+
+        local base_url = `http://127.0.0.1:${srv.port}`
+
+        -- Testa rota estática /
+        local r_html = http.get(`${base_url}/`)
+        t.eq(r_html.status, 200)
+        t.contains(r_html.body, "Finanças")
+
+        -- Testa API de Dashboard
+        local r_dash = http.get(`${base_url}/api/dashboard?month=2026-10`)
+        t.eq(r_dash.status, 200)
+        local j_dash = t.no_error(r_dash:json())
+        t.ok(j_dash.ok)
+        t.eq(j_dash.data.month, "2026-10")
+    end)
+end)

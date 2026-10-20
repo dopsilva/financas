@@ -1,0 +1,15 @@
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Sea compiled bytecode & bundles
+*.seac
+
+# Logs & temporary files
+*.log
+/tmp/
+.DS_Store

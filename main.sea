@@ -1,0 +1,38 @@
+#!/usr/bin/env sea
+-- main.sea — Ponto de entrada do Sistema de Gestão Financeira Pessoal em Sea
+
+local flags = require("sea/flags")
+local log = require("sea/log")
+local http = require("../sea_vm/libs/http/http")
+local db_mod = require("./db")
+local server_mod = require("./server")
+
+local port_flag = flags.int("port", 8080, "Porta HTTP do servidor web", {alias = "p"})
+local host_flag = flags.string("host", "0.0.0.0", "Endereço IP para escutar")
+local db_flag = flags.string("db", "financas.db", "Caminho do arquivo SQLite")
+
+flags.parse()
+
+local store = db_mod.open(db_flag.value)
+if is_error(store) then
+    log.fatal("Falha ao abrir banco de dados SQLite", {db = db_flag.value, err = store})
+end
+defer store:close()
+
+local public_dir = path.join(path.dirname(os.args[0] or "main.sea"), "public")
+if not fs.isdir(public_dir) then
+    public_dir = "public"
+end
+
+local router = server_mod.build_router(store, public_dir)
+
+log.info("Iniciando FinançasSea — Gestão Financeira Pessoal", {
+    url = `http://localhost:${port_flag.value}`,
+    db = db_flag.value,
+})
+
+http.serve(port_flag.value, router, {
+    host = host_flag.value,
+    log = true,
+    gzip = true,
+})

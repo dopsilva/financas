@@ -1,0 +1,546 @@
+-- reports.sea — Motor de Fluxo de Caixa (Realizado e Projetado), Dashboard, Orçamentos e DRE
+
+local db_mod = require("./db")
+local round2 = db_mod.round2
+local today_iso = db_mod.today_iso
+local month_bounds = db_mod.month_bounds
+local parse_ym = db_mod.parse_ym
+local days_in_month = db_mod.days_in_month
+
+local M = {}
+
+local MONTH_NAMES_SHORT = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+
+function M.get_dashboard(store, ym)
+    if ym == nil or ym == "" then
+        ym = string.sub(today_iso(), 1, 7)
+    end
+    -- Garante que as contas recorrentes do mês selecionado já foram geradas
+    store:generate_recurring_for_month(ym)?
+
+    local start_d, end_d = month_bounds(ym)
+    local today = today_iso()
+    local next7 = time.now():add_date(0, 0, 7):format("2006-01-02")
+
+    local accounts = store:list_accounts()?
+    local total_current_balance = 0.0
+    local total_projected_balance = 0.0
+    for _, a in accounts do
+        total_current_balance += (a.current_balance or 0.0)
+        total_projected_balance += (a.projected_balance or 0.0)
+    end
+    total_current_balance = round2(total_current_balance)
+    total_projected_balance = round2(total_projected_balance)
+
+    local inc_paid = store.db:value(
+        "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'income' AND status = 'paid' AND due_date >= ? AND due_date <= ?",
+        start_d, end_d
+    )? or 0.0
+    local inc_pending = store.db:value(
+        "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'income' AND status = 'pending' AND due_date >= ? AND due_date <= ?",
+        start_d, end_d
+    )? or 0.0
+
+    local exp_paid = store.db:value(
+        "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'expense' AND status = 'paid' AND due_date >= ? AND due_date <= ?",
+        start_d, end_d
+    )? or 0.0
+    local exp_pending = store.db:value(
+        "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'expense' AND status = 'pending' AND due_date >= ? AND due_date <= ?",
+        start_d, end_d
+    )? or 0.0
+
+    local inc_total = round2(inc_paid + inc_pending)
+    local exp_total = round2(exp_paid + exp_pending)
+    local net_realized = round2(inc_paid - exp_paid)
+    local net_projected = round2(inc_total - exp_total)
+    local savings_rate = 0.0
+    if inc_total > 0 then
+        savings_rate = round2((net_projected / inc_total) * 100.0)
+    end
+
+    -- Contas em atraso (qualquer data anterior a hoje ainda pendente)
+    local overdue_rows = store.db:query(`
+        SELECT t.*, (t.amount - t.discount + t.interest) AS final_amount,
+               c.name AS category_name, c.color AS category_color, a.name AS account_name
+        FROM transactions t
+        LEFT JOIN categories c ON c.id = t.category_id
+        LEFT JOIN accounts a ON a.id = t.account_id
+        WHERE t.status = 'pending' AND t.due_date < ?
+        ORDER BY t.due_date ASC
+        LIMIT 25
+    `,
+        today)?
+
+    local overdue_total_expense = 0.0
+    local overdue_total_income = 0.0
+    for _, r in overdue_rows do
+        r.final_amount = round2(r.final_amount or r.amount)
+        if r.type == "expense" then
+            overdue_total_expense += r.final_amount
+        elseif r.type == "income" then
+            overdue_total_income += r.final_amount
+        end
+    end
+
+    -- Contas vencendo hoje ou nos próximos 7 dias
+    local upcoming_rows = store.db:query(`
+        SELECT t.*, (t.amount - t.discount + t.interest) AS final_amount,
+               c.name AS category_name, c.color AS category_color, a.name AS account_name
+        FROM transactions t
+        LEFT JOIN categories c ON c.id = t.category_id
+        LEFT JOIN accounts a ON a.id = t.account_id
+        WHERE t.status = 'pending' AND t.due_date >= ? AND t.due_date <= ?
+        ORDER BY t.due_date ASC
+        LIMIT 25
+    `,
+        today, next7)?
+    for _, r in upcoming_rows do
+        r.final_amount = round2(r.final_amount or r.amount)
+    end
+
+    -- Despesas por categoria no mês (com orçamento)
+    local cat_expenses = store.db:query(`
+        SELECT c.id, c.name, c.color, c.icon, c.budget_monthly,
+               COALESCE(SUM(CASE WHEN t.status = 'paid' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS paid_amount,
+               COALESCE(SUM(CASE WHEN t.status = 'pending' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS pending_amount,
+               COALESCE(SUM(t.amount - t.discount + t.interest), 0.0) AS total_amount,
+               COUNT(t.id) AS tx_count
+        FROM categories c
+        LEFT JOIN transactions t ON t.category_id = c.id
+            AND t.type = 'expense'
+            AND t.status IN ('paid', 'pending')
+            AND t.due_date >= ? AND t.due_date <= ?
+        WHERE c.active = 1 AND c.type = 'expense'
+        GROUP BY c.id
+        ORDER BY total_amount DESC, c.name ASC
+    `,
+        start_d, end_d)?
+
+    for _, ce in cat_expenses do
+        ce.paid_amount = round2(ce.paid_amount)
+        ce.pending_amount = round2(ce.pending_amount)
+        ce.total_amount = round2(ce.total_amount)
+        ce.pct_of_expenses = (exp_total > 0) and round2((ce.total_amount / exp_total) * 100.0) or 0.0
+        ce.pct_of_budget = (ce.budget_monthly > 0) and round2((ce.total_amount / ce.budget_monthly) * 100.0) or 0.0
+    end
+
+    -- Receitas por categoria no mês
+    local cat_incomes = store.db:query(`
+        SELECT c.id, c.name, c.color, c.icon,
+               COALESCE(SUM(CASE WHEN t.status = 'paid' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS paid_amount,
+               COALESCE(SUM(CASE WHEN t.status = 'pending' THEN (t.amount - t.discount + t.interest) ELSE 0.0 END), 0.0) AS pending_amount,
+               COALESCE(SUM(t.amount - t.discount + t.interest), 0.0) AS total_amount,
+               COUNT(t.id) AS tx_count
+        FROM categories c
+        LEFT JOIN transactions t ON t.category_id = c.id
+            AND t.type = 'income'
+            AND t.status IN ('paid', 'pending')
+            AND t.due_date >= ? AND t.due_date <= ?
+        WHERE c.active = 1 AND c.type = 'income'
+        GROUP BY c.id
+        ORDER BY total_amount DESC, c.name ASC
+    `,
+        start_d, end_d)?
+
+    for _, ci in cat_incomes do
+        ci.paid_amount = round2(ci.paid_amount)
+        ci.pending_amount = round2(ci.pending_amount)
+        ci.total_amount = round2(ci.total_amount)
+        ci.pct_of_incomes = (inc_total > 0) and round2((ci.total_amount / inc_total) * 100.0) or 0.0
+    end
+
+    local goals = store:list_goals()?
+
+    return {
+        month = ym,
+        start_date = start_d,
+        end_date = end_d,
+        accounts = accounts,
+        total_current_balance = total_current_balance,
+        total_projected_balance = total_projected_balance,
+        month_summary = {
+            income_paid = round2(inc_paid),
+            income_pending = round2(inc_pending),
+            income_total = inc_total,
+            expense_paid = round2(exp_paid),
+            expense_pending = round2(exp_pending),
+            expense_total = exp_total,
+            net_realized = net_realized,
+            net_projected = net_projected,
+            savings_rate = savings_rate,
+        },
+        overdue = {
+            items = overdue_rows,
+            count = len(overdue_rows),
+            total_expense = round2(overdue_total_expense),
+            total_income = round2(overdue_total_income),
+        },
+        upcoming = {
+            items = upcoming_rows,
+            count = len(upcoming_rows),
+        },
+        by_category_expense = cat_expenses,
+        by_category_income = cat_incomes,
+        goals = goals,
+    }
+end
+
+-- Fluxo de Caixa Completo (Diário ou Mensal, Realizado + Projetado)
+function M.get_cashflow(store, opts)
+    opts = opts or {}
+    local mode = opts.mode or "daily"
+    local account_id = tonumber(opts.account_id)
+    if account_id ~= nil and account_id <= 0 then account_id = nil end
+
+    if mode == "monthly" then
+        return M.get_monthly_cashflow(store, opts.month, tonumber(opts.months) or 12, account_id)
+    end
+
+    local ym = opts.month
+    local start_d = opts.start_date
+    local end_d = opts.end_date
+    if (start_d == nil or start_d == "") or (end_d == nil or end_d == "") then
+        if ym == nil or ym == "" then ym = string.sub(today_iso(), 1, 7) end
+        start_d, end_d = month_bounds(ym)
+    end
+
+    -- Garante recorrências geradas para os meses cobertos
+    local ym1 = string.sub(start_d, 1, 7)
+    local ym2 = string.sub(end_d, 1, 7)
+    store:generate_recurring_for_month(ym1)?
+    if ym2 ~= ym1 then
+        store:generate_recurring_for_month(ym2)?
+    end
+
+    local opening_realized = store:account_balance_before(account_id, start_d, false)?
+    local opening_projected = store:account_balance_before(account_id, start_d, true)?
+
+    local acc_filter = ""
+    local params = [start_d, end_d]
+    if account_id ~= nil then
+        acc_filter = "AND (account_id = ? OR destination_account_id = ?)"
+        params[] = account_id
+        params[] = account_id
+    end
+
+    local txs = store.db:query(`
+        SELECT id, description, amount, discount, interest,
+               (amount - discount + interest) AS final_amount,
+               type, status, due_date, payment_date, account_id, destination_account_id
+        FROM transactions
+        WHERE status IN ('paid', 'pending')
+          AND due_date >= ? AND due_date <= ?
+          ${acc_filter}
+        ORDER BY due_date ASC, id ASC
+    `,
+        params)?
+
+    local by_day = [=]
+    for _, tx in txs do
+        local d = tx.due_date
+        local entry, ok = by_day[d]
+        if not ok then
+            entry = {
+                income_paid = 0.0,
+                income_pending = 0.0,
+                expense_paid = 0.0,
+                expense_pending = 0.0,
+                tx_count = 0,
+            }
+            by_day[d] = entry
+        end
+        local val = round2(tx.final_amount or tx.amount)
+        entry.tx_count += 1
+
+        if tx.type == "income" then
+            if account_id == nil or tx.account_id == account_id then
+                if tx.status == "paid" then
+                    entry.income_paid += val
+                else
+                    entry.income_pending += val
+                end
+            end
+        elseif tx.type == "expense" then
+            if account_id == nil or tx.account_id == account_id then
+                if tx.status == "paid" then
+                    entry.expense_paid += val
+                else
+                    entry.expense_pending += val
+                end
+            end
+        elseif tx.type == "transfer" and account_id ~= nil then
+            if tx.account_id == account_id then
+                if tx.status == "paid" then
+                    entry.expense_paid += val
+                else
+                    entry.expense_pending += val
+                end
+            elseif tx.destination_account_id == account_id then
+                if tx.status == "paid" then
+                    entry.income_paid += val
+                else
+                    entry.income_pending += val
+                end
+            end
+        end
+    end
+
+    -- Itera dia a dia de start_d até end_d
+    local cur_t = time.parse(start_d, "2006-01-02")
+    local end_t = time.parse(end_d, "2006-01-02")
+    if is_error(cur_t) or is_error(end_t) then
+        return error("Datas inválidas para o fluxo de caixa")
+    end
+
+    local series = []
+    local run_realized = opening_realized
+    local run_projected = opening_projected
+    local total_in_paid = 0.0
+    local total_in_pending = 0.0
+    local total_out_paid = 0.0
+    local total_out_pending = 0.0
+    local min_proj = opening_projected
+    local max_proj = opening_projected
+    local days_negative = 0
+
+    local safety = 0
+    while not cur_t:after(end_t) and safety < 400 do
+        safety += 1
+        local d_str = cur_t:format("2006-01-02")
+        local label = cur_t:format("02/01")
+        local day_data = by_day[d_str]
+        local in_p = day_data and round2(day_data.income_paid) or 0.0
+        local in_pend = day_data and round2(day_data.income_pending) or 0.0
+        local out_p = day_data and round2(day_data.expense_paid) or 0.0
+        local out_pend = day_data and round2(day_data.expense_pending) or 0.0
+        local tx_cnt = day_data and day_data.tx_count or 0
+
+        local in_tot = round2(in_p + in_pend)
+        local out_tot = round2(out_p + out_pend)
+        local net_real = round2(in_p - out_p)
+        local net_proj = round2(in_tot - out_tot)
+
+        local open_real = run_realized
+        local open_proj = run_projected
+        run_realized = round2(run_realized + net_real)
+        run_projected = round2(run_projected + net_proj)
+
+        total_in_paid = round2(total_in_paid + in_p)
+        total_in_pending = round2(total_in_pending + in_pend)
+        total_out_paid = round2(total_out_paid + out_p)
+        total_out_pending = round2(total_out_pending + out_pend)
+
+        if run_projected < min_proj then min_proj = run_projected end
+        if run_projected > max_proj then max_proj = run_projected end
+        if run_projected < 0 then days_negative += 1 end
+
+        series[] = {
+            date = d_str,
+            label = label,
+            opening_realized = open_real,
+            opening_projected = open_proj,
+            income_paid = in_p,
+            income_pending = in_pend,
+            income_total = in_tot,
+            expense_paid = out_p,
+            expense_pending = out_pend,
+            expense_total = out_tot,
+            net_realized = net_real,
+            net_projected = net_proj,
+            balance_realized = run_realized,
+            balance_projected = run_projected,
+            tx_count = tx_cnt,
+        }
+        cur_t = cur_t:add_date(0, 0, 1)
+    end
+
+    return {
+        mode = "daily",
+        start_date = start_d,
+        end_date = end_d,
+        account_id = account_id,
+        summary = {
+            opening_realized = opening_realized,
+            opening_projected = opening_projected,
+            total_inflows_paid = total_in_paid,
+            total_inflows_pending = total_in_pending,
+            total_inflows = round2(total_in_paid + total_in_pending),
+            total_outflows_paid = total_out_paid,
+            total_outflows_pending = total_out_pending,
+            total_outflows = round2(total_out_paid + total_out_pending),
+            net_realized = round2(total_in_paid - total_out_paid),
+            net_projected = round2((total_in_paid + total_in_pending) - (total_out_paid + total_out_pending)),
+            closing_realized = run_realized,
+            closing_projected = run_projected,
+            min_projected_balance = min_proj,
+            max_projected_balance = max_proj,
+            days_negative = days_negative,
+        },
+        series = series,
+    }
+end
+
+function M.get_monthly_cashflow(store, base_ym, num_months, account_id)
+    if base_ym == nil or base_ym == "" then
+        base_ym = string.sub(today_iso(), 1, 7)
+    end
+    if num_months == nil or num_months < 1 then num_months = 12 end
+    if num_months > 24 then num_months = 24 end
+
+    -- Começa 5 meses antes do base_ym e vai até num_months à frente (visão de histórico + projeção)
+    local by, bm = parse_ym(base_ym)
+    local start_y = by
+    local start_m = bm - 3
+    while start_m < 1 do
+        start_m += 12
+        start_y -= 1
+    end
+
+    local first_date = string.format("%04d-%02d-01", start_y, start_m)
+    local opening_realized = store:account_balance_before(account_id, first_date, false)?
+    local opening_projected = store:account_balance_before(account_id, first_date, true)?
+
+    local run_realized = opening_realized
+    local run_projected = opening_projected
+    local series = []
+
+    local total_in_paid = 0.0
+    local total_in_pending = 0.0
+    local total_out_paid = 0.0
+    local total_out_pending = 0.0
+    local min_proj = opening_projected
+    local max_proj = opening_projected
+    local months_negative = 0
+
+    local cy = start_y
+    local cm = start_m
+    for _ = 1, num_months do
+        local ym = string.format("%04d-%02d", cy, cm)
+        store:generate_recurring_for_month(ym)?
+        local s_d, e_d = month_bounds(ym)
+        local m_label = `${MONTH_NAMES_SHORT[cm - 1]}/${string.sub(tostring(cy), 3, 4)}`
+
+        local in_p = 0.0
+        local in_pend = 0.0
+        local out_p = 0.0
+        local out_pend = 0.0
+
+        if account_id ~= nil then
+            in_p = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE ((type = 'income' AND account_id = ?) OR (type = 'transfer' AND destination_account_id = ?)) AND status = 'paid' AND due_date >= ? AND due_date <= ?",
+                account_id, account_id, s_d, e_d
+            )? or 0.0
+            in_pend = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE ((type = 'income' AND account_id = ?) OR (type = 'transfer' AND destination_account_id = ?)) AND status = 'pending' AND due_date >= ? AND due_date <= ?",
+                account_id, account_id, s_d, e_d
+            )? or 0.0
+            out_p = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE ((type = 'expense' AND account_id = ?) OR (type = 'transfer' AND account_id = ?)) AND status = 'paid' AND due_date >= ? AND due_date <= ?",
+                account_id, account_id, s_d, e_d
+            )? or 0.0
+            out_pend = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE ((type = 'expense' AND account_id = ?) OR (type = 'transfer' AND account_id = ?)) AND status = 'pending' AND due_date >= ? AND due_date <= ?",
+                account_id, account_id, s_d, e_d
+            )? or 0.0
+        else
+            in_p = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'income' AND status = 'paid' AND due_date >= ? AND due_date <= ?",
+                s_d, e_d
+            )? or 0.0
+            in_pend = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'income' AND status = 'pending' AND due_date >= ? AND due_date <= ?",
+                s_d, e_d
+            )? or 0.0
+            out_p = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'expense' AND status = 'paid' AND due_date >= ? AND due_date <= ?",
+                s_d, e_d
+            )? or 0.0
+            out_pend = store.db:value(
+                "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'expense' AND status = 'pending' AND due_date >= ? AND due_date <= ?",
+                s_d, e_d
+            )? or 0.0
+        end
+
+        in_p = round2(in_p)
+        in_pend = round2(in_pend)
+        out_p = round2(out_p)
+        out_pend = round2(out_pend)
+        local in_tot = round2(in_p + in_pend)
+        local out_tot = round2(out_p + out_pend)
+        local net_real = round2(in_p - out_p)
+        local net_proj = round2(in_tot - out_tot)
+
+        local open_real = run_realized
+        local open_proj = run_projected
+        run_realized = round2(run_realized + net_real)
+        run_projected = round2(run_projected + net_proj)
+
+        total_in_paid = round2(total_in_paid + in_p)
+        total_in_pending = round2(total_in_pending + in_pend)
+        total_out_paid = round2(total_out_paid + out_p)
+        total_out_pending = round2(total_out_pending + out_pend)
+
+        if run_projected < min_proj then min_proj = run_projected end
+        if run_projected > max_proj then max_proj = run_projected end
+        if run_projected < 0 then months_negative += 1 end
+
+        series[] = {
+            date = ym,
+            label = m_label,
+            opening_realized = open_real,
+            opening_projected = open_proj,
+            income_paid = in_p,
+            income_pending = in_pend,
+            income_total = in_tot,
+            expense_paid = out_p,
+            expense_pending = out_pend,
+            expense_total = out_tot,
+            net_realized = net_real,
+            net_projected = net_proj,
+            balance_realized = run_realized,
+            balance_projected = run_projected,
+        }
+
+        cm += 1
+        if cm > 12 then
+            cm = 1
+            cy += 1
+        end
+    end
+
+    local end_y = cy
+    local end_m = cm - 1
+    if end_m < 1 then
+        end_m = 12
+        end_y -= 1
+    end
+    local last_date = string.format("%04d-%02d-%02d", end_y, end_m, days_in_month(end_y, end_m))
+
+    return {
+        mode = "monthly",
+        start_date = first_date,
+        end_date = last_date,
+        account_id = account_id,
+        summary = {
+            opening_realized = opening_realized,
+            opening_projected = opening_projected,
+            total_inflows_paid = total_in_paid,
+            total_inflows_pending = total_in_pending,
+            total_inflows = round2(total_in_paid + total_in_pending),
+            total_outflows_paid = total_out_paid,
+            total_outflows_pending = total_out_pending,
+            total_outflows = round2(total_out_paid + total_out_pending),
+            net_realized = round2(total_in_paid - total_out_paid),
+            net_projected = round2((total_in_paid + total_in_pending) - (total_out_paid + total_out_pending)),
+            closing_realized = run_realized,
+            closing_projected = run_projected,
+            min_projected_balance = min_proj,
+            max_projected_balance = max_proj,
+            days_negative = months_negative,
+        },
+        series = series,
+    }
+end
+
+return M

@@ -1,0 +1,518 @@
+-- importer.sea — Importador de Extratos Bancários (OFX e CSV) e Conciliação Inteligente
+
+local db_mod = require("./db")
+local round2 = db_mod.round2
+local today_iso = db_mod.today_iso
+local now_iso = db_mod.now_iso
+
+local M = {}
+
+local function parse_amount_str(s)
+    if s == nil then return 0.0 end
+    if type(s) == "number" or type(s) == "int" then return round2(s) end
+    local clean = string.trim(tostring(s))
+    clean = string.replace(clean, "R$", "")
+    clean = string.replace(clean, " ", "")
+    if clean == "" then return 0.0 end
+
+    -- Detecta formato brasileiro "1.234,56" vs "1,234.56" vs "1234,56"
+    local has_comma = string.find(clean, ",") ~= nil
+    local has_dot = string.find(clean, ".") ~= nil
+    if has_comma and has_dot then
+        local c_pos = string.find(clean, ",")
+        local d_pos = string.find(clean, ".")
+        if c_pos > d_pos then
+            -- Ponto é milhar, vírgula é decimal (1.234,56)
+            clean = string.replace(clean, ".", "")
+            clean = string.replace(clean, ",", ".")
+        else
+            -- Vírgula é milhar, ponto é decimal (1,234.56)
+            clean = string.replace(clean, ",", "")
+        end
+    elseif has_comma then
+        clean = string.replace(clean, ",", ".")
+    end
+
+    local n = tonumber(clean)
+    if n == nil then return 0.0 end
+    return round2(n)
+end
+
+local function parse_date_str(s)
+    if s == nil then return today_iso() end
+    local clean = string.trim(tostring(s))
+    if clean == "" then return today_iso() end
+
+    -- Formato OFX: YYYYMMDD ou YYYYMMDDHHMMSS...
+    if re.test("^\\d{8}", clean) then
+        local y = string.sub(clean, 1, 4)
+        local m = string.sub(clean, 5, 6)
+        local d = string.sub(clean, 7, 8)
+        return `${y}-${m}-${d}`
+    end
+
+    -- Formato ISO: YYYY-MM-DD
+    if re.test("^\\d{4}-\\d{2}-\\d{2}", clean) then
+        return string.sub(clean, 1, 10)
+    end
+
+    -- Formato BR: DD/MM/YYYY ou DD-MM-YYYY
+    local cap = re.captures("^(\\d{1,2})[/\\-](\\d{1,2})[/\\-](\\d{2,4})", clean)
+    if cap ~= nil then
+        local d = db_mod.toint(cap[1]) or 1
+        local m = db_mod.toint(cap[2]) or 1
+        local y = db_mod.toint(cap[3]) or 2026
+        if y < 100 then y += 2000 end
+        return string.format("%04d-%02d-%02d", y, m, d)
+    end
+
+    return today_iso()
+end
+
+local function extract_ofx_tag(block, tag)
+    -- Procura <TAG>valor</TAG> ou <TAG>valor\n (SGML OFX 1.x)
+    local pat_xml = `<${tag}>([^<\\r\\n]+)`
+    local cap = re.captures(pat_xml, block)
+    if cap ~= nil and cap[1] ~= nil then
+        return string.trim(cap[1])
+    end
+    return nil
+end
+
+function M.parse_ofx(content)
+    local items = []
+    local parts = string.split(content or "", "<STMTTRN>")
+    if len(parts) <= 1 then
+        parts = string.split(content or "", "<stmttrn>")
+    end
+
+    for i = 1, len(parts) - 1 do
+        local blk = parts[i]
+        local end_pos = string.find(blk, "</STMTTRN>") or string.find(blk, "</stmttrn>")
+        if end_pos ~= nil then
+            blk = string.sub(blk, 1, end_pos - 1)
+        end
+
+        local dt_raw = extract_ofx_tag(blk, "DTPOSTED") or extract_ofx_tag(blk, "dtposted")
+        local amt_raw = extract_ofx_tag(blk, "TRNAMT") or extract_ofx_tag(blk, "trnamt")
+        local fitid = extract_ofx_tag(blk, "FITID") or extract_ofx_tag(blk, "fitid")
+        local memo = extract_ofx_tag(blk, "MEMO") or extract_ofx_tag(blk, "memo")
+        local name = extract_ofx_tag(blk, "NAME") or extract_ofx_tag(blk, "name")
+        local trntype = extract_ofx_tag(blk, "TRNTYPE") or extract_ofx_tag(blk, "trntype") or ""
+
+        local desc = memo or name or "Transação Bancária"
+        if memo ~= nil and name ~= nil and memo ~= name and not string.contains(string.upper(memo), string.upper(name)) then
+            desc = `${name} - ${memo}`
+        end
+        desc = string.trim(desc)
+
+        local signed_amt = parse_amount_str(amt_raw)
+        if signed_amt ~= 0.0 then
+            local tx_type = (signed_amt >= 0) and "income" or "expense"
+            if string.upper(trntype) == "DEBIT" and signed_amt > 0 then
+                tx_type = "expense"
+            end
+            local abs_amt = math.abs(signed_amt)
+            local date_iso = parse_date_str(dt_raw)
+            if fitid == nil or fitid == "" then
+                fitid = "ofx_" .. string.sub(hash.sha256(`${date_iso}|${abs_amt}|${tx_type}|${desc}`), 1, 20)
+            end
+            items[] = {
+                date = date_iso,
+                description = desc,
+                amount = round2(abs_amt),
+                type = tx_type,
+                fitid = fitid,
+                raw_type = trntype,
+            }
+        end
+    end
+
+    return items
+end
+
+local function detect_csv_sep(content)
+    local lines = string.splitlines(content or "")
+    for _, line in lines do
+        local trimmed = string.trim(line)
+        if trimmed ~= "" then
+            local semi_count = len(string.split(trimmed, ";")) - 1
+            local comma_count = len(string.split(trimmed, ",")) - 1
+            if semi_count > comma_count then return ";" end
+            return ","
+        end
+    end
+    return ","
+end
+
+function M.parse_csv(content)
+    local sep = detect_csv_sep(content)
+    local rows = csv.decode(content or "", {sep = sep, trim = true, skip_empty = true})?
+    if len(rows) == 0 then return [] end
+
+    local header = rows[0]
+    local col_date = -1
+    local col_desc = -1
+    local col_amt = -1
+    local col_in = -1
+    local col_out = -1
+    local col_id = -1
+    local has_header = false
+
+    for i = 0, len(header) - 1 do
+        local h = string.lower(string.trim(header[i] or ""))
+        if h == "data" or h == "date" or string.contains(h, "data") or string.contains(h, "vencimento") then
+            col_date = i
+            has_header = true
+        elseif h == "descrição" or h == "descricao" or h == "histórico" or h == "historico" or h == "description" or h == "título" or h == "titulo" or h == "memo" or h == "lançamento" or h == "lancamento" then
+            col_desc = i
+            has_header = true
+        elseif h == "valor" or h == "amount" or h == "quantia" or string.contains(h, "valor") then
+            col_amt = i
+            has_header = true
+        elseif h == "entrada" or h == "crédito" or h == "credito" then
+            col_in = i
+            has_header = true
+        elseif h == "saída" or h == "saida" or h == "débito" or h == "debito" then
+            col_out = i
+            has_header = true
+        elseif h == "id" or h == "identificador" or h == "fitid" or h == "documento" then
+            col_id = i
+            has_header = true
+        end
+    end
+
+    local start_idx = 1
+    if not has_header then
+        start_idx = 0
+        col_date = 0
+        col_desc = 1
+        col_amt = 2
+    else
+        if col_date < 0 then col_date = 0 end
+        if col_desc < 0 then col_desc = (len(header) > 1) and 1 or 0 end
+        if col_amt < 0 and col_in < 0 and len(header) > 2 then col_amt = 2 end
+    end
+
+    local items = []
+    for r_idx = start_idx, len(rows) - 1 do
+        local row = rows[r_idx]
+        if len(row) >= 2 then
+            local d_raw = (col_date >= 0 and col_date < len(row)) and row[col_date] or ""
+            local desc_raw = (col_desc >= 0 and col_desc < len(row)) and row[col_desc] or "Lançamento CSV"
+            local fitid_raw = (col_id >= 0 and col_id < len(row)) and row[col_id] or ""
+
+            local signed_amt = 0.0
+            if col_amt >= 0 and col_amt < len(row) then
+                signed_amt = parse_amount_str(row[col_amt])
+            else
+                local v_in = (col_in >= 0 and col_in < len(row)) and parse_amount_str(row[col_in]) or 0.0
+                local v_out = (col_out >= 0 and col_out < len(row)) and parse_amount_str(row[col_out]) or 0.0
+                if v_in > 0 then
+                    signed_amt = v_in
+                elseif v_out ~= 0 then
+                    signed_amt = -math.abs(v_out)
+                end
+            end
+
+            if signed_amt ~= 0.0 and string.trim(d_raw) ~= "" then
+                local date_iso = parse_date_str(d_raw)
+                local tx_type = (signed_amt >= 0) and "income" or "expense"
+                local abs_amt = round2(math.abs(signed_amt))
+                local desc = string.trim(desc_raw)
+                if desc == "" then desc = "Transação Importada" end
+                local fitid = string.trim(fitid_raw)
+                if fitid == "" then
+                    fitid = "csv_" .. string.sub(hash.sha256(`${date_iso}|${abs_amt}|${tx_type}|${desc}|${r_idx}`), 1, 20)
+                end
+                items[] = {
+                    date = date_iso,
+                    description = desc,
+                    amount = abs_amt,
+                    type = tx_type,
+                    fitid = fitid,
+                }
+            end
+        end
+    end
+
+    return items
+end
+
+-- Analisa o extrato e retorna os itens enriquecidos com categorização automática e sugestões de conciliação
+function M.preview_statement(store, content, filename, account_id)
+    local fname = string.lower(filename or "")
+    local trimmed = string.trim(content or "")
+    if trimmed == "" then
+        return error("O conteúdo do extrato está vazio")
+    end
+
+    local is_ofx = string.ends_with(fname, ".ofx") or string.contains(string.upper(trimmed), "<OFX") or string.contains(string.upper(trimmed), "<STMTTRN>")
+    local raw_items = nil
+    local format_detected = is_ofx and "OFX" or "CSV"
+
+    if is_ofx then
+        raw_items = M.parse_ofx(trimmed)
+    else
+        raw_items = M.parse_csv(trimmed)?
+    end
+
+    if len(raw_items) == 0 then
+        return error("Nenhuma transação válida foi encontrada no arquivo enviado")
+    end
+
+    local enriched = []
+    local new_count = 0
+    local reconcile_count = 0
+    local duplicate_count = 0
+
+    for idx, item in raw_items do
+        -- 1. Verifica se já foi importado pelo fitid
+        local existing_fit = store.db:row(
+            "SELECT id, description, due_date FROM transactions WHERE bank_fitid = ? LIMIT 1",
+            item.fitid
+        )?
+        local already_imported = (existing_fit ~= nil)
+
+        -- 2. Categorização inteligente
+        local cat_match = store:match_category_for_description(item.description, item.type)?
+        local cat_id = cat_match and cat_match.category_id or nil
+        local cat_name = cat_match and cat_match.category_name or "Sem Categoria"
+        local cat_color = cat_match and cat_match.category_color or "#64748b"
+        local contact = cat_match and cat_match.contact or ""
+
+        -- 3. Procura candidato para conciliação (mesmo tipo, mesmo valor exato, data próxima em ±7 dias, ainda não conciliado)
+        local candidate = nil
+        if not already_imported then
+            local t_obj = time.parse(item.date, "2006-01-02")
+            if not is_error(t_obj) then
+                local min_d = t_obj:add_date(0, 0, -7):format("2006-01-02")
+                local max_d = t_obj:add_date(0, 0, 7):format("2006-01-02")
+                candidate = store.db:row(`
+                    SELECT id, description, due_date, status, (amount - discount + interest) AS final_amount, category_id
+                    FROM transactions
+                    WHERE type = ?
+                      AND status IN ('pending', 'paid')
+                      AND reconciled = 0
+                      AND bank_fitid IS NULL
+                      AND ABS((amount - discount + interest) - ?) < 0.02
+                      AND due_date >= ? AND due_date <= ?
+                    ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END ASC,
+                             ABS(julianday(due_date) - julianday(?)) ASC
+                    LIMIT 1
+                `,
+                    item.type, item.amount, min_d, max_d, item.date)?
+            end
+        end
+
+        local action = "import"
+        local reconcile_tx_id = nil
+        if already_imported then
+            action = "skip"
+            duplicate_count += 1
+        elseif candidate ~= nil then
+            action = "reconcile"
+            reconcile_tx_id = candidate.id
+            if candidate.category_id ~= nil then
+                cat_id = candidate.category_id
+            end
+            reconcile_count += 1
+        else
+            new_count += 1
+        end
+
+        enriched[] = {
+            index = idx,
+            date = item.date,
+            description = item.description,
+            amount = item.amount,
+            type = item.type,
+            fitid = item.fitid,
+            category_id = cat_id,
+            category_name = cat_name,
+            category_color = cat_color,
+            contact = contact,
+            already_imported = already_imported,
+            reconcile_candidate = candidate,
+            reconcile_tx_id = reconcile_tx_id,
+            action = action,
+        }
+    end
+
+    return {
+        format = format_detected,
+        account_id = account_id,
+        total_found = len(enriched),
+        new_count = new_count,
+        reconcile_count = reconcile_count,
+        duplicate_count = duplicate_count,
+        items = enriched,
+    }
+end
+
+function M.commit_statement(store, data)
+    local account_id = db_mod.toint(data.account_id)
+    if account_id ~= nil and account_id > 0 then
+        local exists_acc = store.db:value("SELECT id FROM accounts WHERE id = ? AND active = 1", account_id)?
+        if exists_acc == nil then account_id = nil end
+    else
+        account_id = nil
+    end
+    if account_id == nil then
+        local first_acc = store.db:value("SELECT id FROM accounts WHERE active = 1 ORDER BY id ASC LIMIT 1")?
+        account_id = first_acc
+    end
+    local items = data.items or []
+    local imported = 0
+    local reconciled = 0
+    local skipped = 0
+    local now = now_iso()
+
+    store.db:transaction(function(db)
+        for _, it in items do
+            local act = it.action or "import"
+            if act == "skip" then
+                skipped += 1
+            elseif act == "reconcile" and it.reconcile_tx_id ~= nil and tonumber(it.reconcile_tx_id) ~= nil then
+                local tx_id = tonumber(it.reconcile_tx_id)
+                db:exec(
+                    "UPDATE transactions SET status = 'paid', payment_date = ?, account_id = ?, bank_fitid = ?, reconciled = 1 WHERE id = ?",
+                    it.date or today_iso(), account_id, it.fitid, tx_id
+                )?
+                reconciled += 1
+            elseif act == "import" then
+                local desc = string.trim(it.description or "Transação Importada")
+                local amt = round2(it.amount)
+                local tx_type = it.type or "expense"
+                local d = it.date or today_iso()
+                local cid = tonumber(it.category_id)
+                if cid ~= nil and cid <= 0 then cid = nil end
+                local contact = string.trim(it.contact or "")
+                db:exec(
+                    `INSERT INTO transactions (
+                        description, amount, type, status, due_date, payment_date, competence_date,
+                        account_id, category_id, payment_method, contact, notes, bank_fitid, reconciled, created_at
+                    ) VALUES (?, ?, ?, 'paid', ?, ?, ?, ?, ?, 'bank_statement', ?, 'Importado via extrato', ?, 1, ?)`,
+                    desc, amt, tx_type, d, d, d, account_id, cid, contact, it.fitid, now
+                )?
+                imported += 1
+            end
+
+            if it.save_rule == true and it.rule_keyword ~= nil and string.trim(it.rule_keyword) ~= "" and tonumber(it.category_id) ~= nil then
+                local kw = string.upper(string.trim(it.rule_keyword))
+                local cid = tonumber(it.category_id)
+                db:exec(
+                    "INSERT INTO categorization_rules (keyword, match_type, tx_type, category_id, contact, priority, created_at) VALUES (?, 'contains', ?, ?, ?, 25, ?)",
+                    kw, it.type or "expense", cid, string.trim(it.contact or ""), now
+                )?
+            end
+        end
+        return true
+    end)?
+
+    return {
+        ok = true,
+        imported = imported,
+        reconciled = reconciled,
+        skipped = skipped,
+    }
+end
+
+function M.sample_ofx(ym)
+    if ym == nil or ym == "" then ym = string.sub(today_iso(), 1, 7) end
+    local y, m = db_mod.parse_ym(ym)
+    local prefix = string.format("%04d%02d", y, m)
+    return `OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:UTF-8
+<OFX>
+  <BANKMSGSRSV1>
+    <STMTTRNRS>
+      <STMTRS>
+        <CURDEF>BRL
+        <BANKACCTFROM>
+          <BANKID>0341
+          <ACCTID>12345-6
+          <ACCTTYPE>CHECKING
+        </BANKACCTFROM>
+        <BANKTRANLIST>
+          <STMTTRN>
+            <TRNTYPE>CREDIT
+            <DTPOSTED>${prefix}05100000[-03:EST]
+            <TRNAMT>8500.00
+            <FITID>FIT-${prefix}-001
+            <MEMO>SALARIO MENSAL EMPRESA TECH LTDA
+          </STMTTRN>
+          <STMTTRN>
+            <TRNTYPE>DEBIT
+            <DTPOSTED>${prefix}06120000[-03:EST]
+            <TRNAMT>-2200.00
+            <FITID>FIT-${prefix}-002
+            <MEMO>PAGAMENTO BOLETO ALUGUEL IMOBILIARIA
+          </STMTTRN>
+          <STMTTRN>
+            <TRNTYPE>DEBIT
+            <DTPOSTED>${prefix}08143000[-03:EST]
+            <TRNAMT>-645.80
+            <FITID>FIT-${prefix}-003
+            <MEMO>COMPRA DEBITO SUPERMERCADO CARREFOUR
+          </STMTTRN>
+          <STMTTRN>
+            <TRNTYPE>DEBIT
+            <DTPOSTED>${prefix}10190000[-03:EST]
+            <TRNAMT>-129.90
+            <FITID>FIT-${prefix}-004
+            <MEMO>FATURA INTERNET FIBRA VIVO
+          </STMTTRN>
+          <STMTTRN>
+            <TRNTYPE>DEBIT
+            <DTPOSTED>${prefix}12201500[-03:EST]
+            <TRNAMT>-84.50
+            <FITID>FIT-${prefix}-005
+            <MEMO>IFOOD *RESTAURANTE SABOR
+          </STMTTRN>
+          <STMTTRN>
+            <TRNTYPE>DEBIT
+            <DTPOSTED>${prefix}14090000[-03:EST]
+            <TRNAMT>-55.90
+            <FITID>FIT-${prefix}-006
+            <MEMO>NETFLIX.COM ASSINATURA
+          </STMTTRN>
+          <STMTTRN>
+            <TRNTYPE>CREDIT
+            <DTPOSTED>${prefix}15160000[-03:EST]
+            <TRNAMT>1800.00
+            <FITID>FIT-${prefix}-007
+            <MEMO>PAGAMENTO PIX RECEBIDO CONSULTORIA WEB
+          </STMTTRN>
+          <STMTTRN>
+            <TRNTYPE>DEBIT
+            <DTPOSTED>${prefix}16180000[-03:EST]
+            <TRNAMT>-210.00
+            <FITID>FIT-${prefix}-008
+            <MEMO>POSTO IPIRANGA COMBUSTIVEL
+          </STMTTRN>
+        </BANKTRANLIST>
+      </STMTRS>
+    </STMTTRNRS>
+  </BANKMSGSRSV1>
+</OFX>`
+end
+
+function M.sample_csv(ym)
+    if ym == nil or ym == "" then ym = string.sub(today_iso(), 1, 7) end
+    local y, m = db_mod.parse_ym(ym)
+    local mm_yyyy = string.format("%02d/%04d", m, y)
+    return `Data;Descrição;Valor;Identificador
+05/${mm_yyyy};SALARIO MENSAL EMPRESA TECH LTDA;8500,00;CSV-${y}${m}-01
+07/${mm_yyyy};SUPERMERCADO PAO DE ACUCAR;-482,35;CSV-${y}${m}-02
+09/${mm_yyyy};CONDOMINIO EDIFICIO SOLAR;-650,00;CSV-${y}${m}-03
+11/${mm_yyyy};UBER *VIAGEM CENTRO;-34,90;CSV-${y}${m}-04
+14/${mm_yyyy};DROGASIL FARMACIA;-118,40;CSV-${y}${m}-05
+16/${mm_yyyy};PAGAMENTO PIX RECEBIDO PROJETO FREELANCE;2400,00;CSV-${y}${m}-06
+18/${mm_yyyy};SPOTIFY PREMIUM;-21,90;CSV-${y}${m}-07`
+end
+
+return M

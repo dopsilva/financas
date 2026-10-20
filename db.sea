@@ -1,0 +1,1303 @@
+-- db.sea — Camada de banco de dados SQLite e regras de negócio financeiras
+
+local sqlite = require("../sea_vm/libs/sqlite/sqlite")
+
+local M = {}
+
+local SCHEMA = [==[
+CREATE TABLE IF NOT EXISTS accounts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL,
+    type             TEXT NOT NULL DEFAULT 'checking',
+    institution      TEXT NOT NULL DEFAULT '',
+    bank_code        TEXT NOT NULL DEFAULT '',
+    branch           TEXT NOT NULL DEFAULT '',
+    account_number   TEXT NOT NULL DEFAULT '',
+    pix_key          TEXT NOT NULL DEFAULT '',
+    initial_balance  REAL NOT NULL DEFAULT 0.0,
+    color            TEXT NOT NULL DEFAULT '#10b981',
+    icon             TEXT NOT NULL DEFAULT 'bank',
+    credit_limit     REAL NOT NULL DEFAULT 0.0,
+    closing_day      INTEGER NOT NULL DEFAULT 1,
+    due_day          INTEGER NOT NULL DEFAULT 10,
+    include_in_total INTEGER NOT NULL DEFAULT 1,
+    notes            TEXT NOT NULL DEFAULT '',
+    active           INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    color           TEXT NOT NULL DEFAULT '#6366f1',
+    icon            TEXT NOT NULL DEFAULT 'tag',
+    budget_monthly  REAL NOT NULL DEFAULT 0.0,
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recurring_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    description     TEXT NOT NULL,
+    amount          REAL NOT NULL,
+    type            TEXT NOT NULL,
+    account_id      INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    category_id     INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    payment_method  TEXT NOT NULL DEFAULT 'pix',
+    contact         TEXT NOT NULL DEFAULT '',
+    notes           TEXT NOT NULL DEFAULT '',
+    frequency       TEXT NOT NULL DEFAULT 'monthly',
+    day_of_month    INTEGER NOT NULL DEFAULT 5,
+    start_date      TEXT NOT NULL,
+    end_date        TEXT,
+    auto_pay        INTEGER NOT NULL DEFAULT 0,
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    description            TEXT NOT NULL,
+    amount                 REAL NOT NULL,
+    discount               REAL NOT NULL DEFAULT 0.0,
+    interest               REAL NOT NULL DEFAULT 0.0,
+    type                   TEXT NOT NULL,
+    status                 TEXT NOT NULL DEFAULT 'pending',
+    due_date               TEXT NOT NULL,
+    payment_date           TEXT,
+    competence_date        TEXT,
+    account_id             INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    destination_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    category_id            INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+    payment_method         TEXT NOT NULL DEFAULT 'pix',
+    contact                TEXT NOT NULL DEFAULT '',
+    notes                  TEXT NOT NULL DEFAULT '',
+    tags                   TEXT NOT NULL DEFAULT '',
+    recurring_id           INTEGER REFERENCES recurring_rules(id) ON DELETE SET NULL,
+    recurring_period       TEXT,
+    installment_group      TEXT,
+    installment_number     INTEGER,
+    installment_total      INTEGER,
+    bank_fitid             TEXT,
+    reconciled             INTEGER NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tx_due_date ON transactions(due_date);
+CREATE INDEX IF NOT EXISTS idx_tx_payment_date ON transactions(payment_date);
+CREATE INDEX IF NOT EXISTS idx_tx_status ON transactions(status);
+CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(type);
+CREATE INDEX IF NOT EXISTS idx_tx_account ON transactions(account_id);
+CREATE INDEX IF NOT EXISTS idx_tx_category ON transactions(category_id);
+CREATE INDEX IF NOT EXISTS idx_tx_fitid ON transactions(bank_fitid);
+CREATE INDEX IF NOT EXISTS idx_tx_recurring ON transactions(recurring_id, recurring_period);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    target_amount   REAL NOT NULL,
+    current_amount  REAL NOT NULL DEFAULT 0.0,
+    deadline        TEXT,
+    color           TEXT NOT NULL DEFAULT '#3b82f6',
+    icon            TEXT NOT NULL DEFAULT 'target',
+    notes           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS categorization_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword         TEXT NOT NULL,
+    match_type      TEXT NOT NULL DEFAULT 'contains',
+    tx_type         TEXT,
+    category_id     INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    contact         TEXT NOT NULL DEFAULT '',
+    priority        INTEGER NOT NULL DEFAULT 10,
+    created_at      TEXT NOT NULL
+);
+]==]
+
+local function round2(n)
+    if n == nil then return 0.0 end
+    local num = tonumber(n)
+    if num == nil then return 0.0 end
+    return math.round(num * 100.0) / 100.0
+end
+
+local function today_iso()
+    return time.now():format("2006-01-02")
+end
+
+local function now_iso()
+    return time.now():format("2006-01-02 15:04:05")
+end
+
+local function toint(v)
+    if v == nil then return nil end
+    if type(v) == "int" then return v end
+    local n = tonumber(v)
+    if n == nil then return nil end
+    return math.trunc(n)
+end
+
+local function parse_ym(ym)
+    if ym == nil or len(ym) < 7 then
+        local now = time.now()
+        return now:year(), now:month()
+    end
+    local y = toint(string.sub(ym, 1, 4))
+    local m = toint(string.sub(ym, 6, 7))
+    if y == nil or m == nil or m < 1 or m > 12 then
+        local now = time.now()
+        return now:year(), now:month()
+    end
+    return y, m
+end
+
+local function days_in_month(y, m)
+    local next_m = m + 1
+    local next_y = y
+    if next_m > 12 then
+        next_m = 1
+        next_y = y + 1
+    end
+    local first_next = time.date(next_y, next_m, 1)
+    local last_cur = first_next:add_date(0, 0, -1)
+    return last_cur:day()
+end
+
+local function month_bounds(ym)
+    local y, m = parse_ym(ym)
+    local last_day = days_in_month(y, m)
+    local start_d = string.format("%04d-%02d-01", y, m)
+    local end_d = string.format("%04d-%02d-%02d", y, m, last_day)
+    return start_d, end_d, y, m, last_day
+end
+
+M.round2 = round2
+M.toint = toint
+M.today_iso = today_iso
+M.now_iso = now_iso
+M.parse_ym = parse_ym
+M.days_in_month = days_in_month
+M.month_bounds = month_bounds
+
+local Store = {}
+
+function M.open(path)
+    path = path or "financas.db"
+    local db = sqlite.open(path, {wal = true, foreign_keys = true})?
+    db:exec(SCHEMA)?
+    local s = {}
+    s.db = db
+    for k, fn in Store do s[k] = fn end
+    s:ensure_defaults()?
+    return s
+end
+
+function Store.close(self)
+    return self.db:close()
+end
+
+function Store.ensure_defaults(self)
+    -- Garante migração de colunas novas caso o banco já exista
+    local cols = self.db:query("PRAGMA table_info(accounts)")?
+    local has_col = [=]
+    for _, c in cols do has_col[c.name] = true end
+    if not has_col["bank_code"] then
+        self.db:exec("ALTER TABLE accounts ADD COLUMN bank_code TEXT NOT NULL DEFAULT ''")?
+    end
+    if not has_col["branch"] then
+        self.db:exec("ALTER TABLE accounts ADD COLUMN branch TEXT NOT NULL DEFAULT ''")?
+    end
+    if not has_col["account_number"] then
+        self.db:exec("ALTER TABLE accounts ADD COLUMN account_number TEXT NOT NULL DEFAULT ''")?
+    end
+    if not has_col["pix_key"] then
+        self.db:exec("ALTER TABLE accounts ADD COLUMN pix_key TEXT NOT NULL DEFAULT ''")?
+    end
+    if not has_col["include_in_total"] then
+        self.db:exec("ALTER TABLE accounts ADD COLUMN include_in_total INTEGER NOT NULL DEFAULT 1")?
+    end
+    if not has_col["notes"] then
+        self.db:exec("ALTER TABLE accounts ADD COLUMN notes TEXT NOT NULL DEFAULT ''")?
+    end
+
+    local cat_count = self.db:value("SELECT count(*) FROM categories")?
+    if cat_count == 0 then
+        local now = now_iso()
+        local default_cats = [
+            {name = "Salário", type = "income", color = "#10b981", icon = "briefcase", budget = 0},
+            {name = "Freelance / Serviços", type = "income", color = "#06b6d4", icon = "code", budget = 0},
+            {name = "Rendimentos / Dividendos", type = "income", color = "#3b82f6", icon = "trending-up", budget = 0},
+            {name = "Vendas / Reembolsos", type = "income", color = "#8b5cf6", icon = "repeat", budget = 0},
+            {name = "Outras Receitas", type = "income", color = "#14b8a6", icon = "plus-circle", budget = 0},
+            {name = "Moradia / Aluguel", type = "expense", color = "#ef4444", icon = "home", budget = 0},
+            {name = "Condomínio / Contas Fixas", type = "expense", color = "#f97316", icon = "zap", budget = 0},
+            {name = "Supermercado", type = "expense", color = "#eab308", icon = "shopping-cart", budget = 0},
+            {name = "Restaurantes / Delivery", type = "expense", color = "#f59e0b", icon = "coffee", budget = 0},
+            {name = "Transporte / Combustível", type = "expense", color = "#6366f1", icon = "car", budget = 0},
+            {name = "Saúde / Farmácia", type = "expense", color = "#ec4899", icon = "heart", budget = 0},
+            {name = "Educação / Cursos", type = "expense", color = "#8b5cf6", icon = "book", budget = 0},
+            {name = "Lazer / Entretenimento", type = "expense", color = "#14b8a6", icon = "film", budget = 0},
+            {name = "Assinaturas / Streaming", type = "expense", color = "#a855f7", icon = "tv", budget = 0},
+            {name = "Compras / Vestuário", type = "expense", color = "#f43f5e", icon = "shopping-bag", budget = 0},
+            {name = "Impostos / Taxas Bancárias", type = "expense", color = "#64748b", icon = "file-text", budget = 0},
+            {name = "Outras Despesas", type = "expense", color = "#94a3b8", icon = "more-horizontal", budget = 0},
+        ]
+        for _, c in default_cats do
+            self.db:exec(
+                "INSERT INTO categories (name, type, color, icon, budget_monthly, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                c.name, c.type, c.color, c.icon, c.budget, now
+            )?
+        end
+
+        -- Seed default categorization rules for bank statement import
+        local rules = [
+            {kw = "SALARIO", cat = "Salário", t = "income", contact = "Empresa"},
+            {kw = "PAGAMENTO PIX RECEBIDO", cat = "Freelance / Serviços", t = "income", contact = ""},
+            {kw = "RENDIMENTO", cat = "Rendimentos / Dividendos", t = "income", contact = "Banco"},
+            {kw = "DIVIDENDO", cat = "Rendimentos / Dividendos", t = "income", contact = "Corretora"},
+            {kw = "ALUGUEL", cat = "Moradia / Aluguel", t = "expense", contact = "Imobiliária"},
+            {kw = "CONDOMINIO", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Condomínio"},
+            {kw = "ENERGIA", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Concessionária Energia"},
+            {kw = "CEMIG", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Cemig"},
+            {kw = "ENEL", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Enel"},
+            {kw = "SABESP", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Sabesp"},
+            {kw = "INTERNET", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Provedor Internet"},
+            {kw = "VIVO", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Vivo"},
+            {kw = "CLARO", cat = "Condomínio / Contas Fixas", t = "expense", contact = "Claro"},
+            {kw = "SUPERMERCADO", cat = "Supermercado", t = "expense", contact = "Supermercado"},
+            {kw = "MERCADO", cat = "Supermercado", t = "expense", contact = "Mercado"},
+            {kw = "CARREFOUR", cat = "Supermercado", t = "expense", contact = "Carrefour"},
+            {kw = "PAO DE ACUCAR", cat = "Supermercado", t = "expense", contact = "Pão de Açúcar"},
+            {kw = "ATACADAO", cat = "Supermercado", t = "expense", contact = "Atacadão"},
+            {kw = "ASSAI", cat = "Supermercado", t = "expense", contact = "Assaí"},
+            {kw = "IFOOD", cat = "Restaurantes / Delivery", t = "expense", contact = "iFood"},
+            {kw = "RESTAURANTE", cat = "Restaurantes / Delivery", t = "expense", contact = "Restaurante"},
+            {kw = "PADARIA", cat = "Restaurantes / Delivery", t = "expense", contact = "Padaria"},
+            {kw = "UBER", cat = "Transporte / Combustível", t = "expense", contact = "Uber"},
+            {kw = "99APP", cat = "Transporte / Combustível", t = "expense", contact = "99"},
+            {kw = "POSTO", cat = "Transporte / Combustível", t = "expense", contact = "Posto de Combustível"},
+            {kw = "IPIRANGA", cat = "Transporte / Combustível", t = "expense", contact = "Posto Ipiranga"},
+            {kw = "SHELL", cat = "Transporte / Combustível", t = "expense", contact = "Posto Shell"},
+            {kw = "DROGASIL", cat = "Saúde / Farmácia", t = "expense", contact = "Drogasil"},
+            {kw = "DROGARIA", cat = "Saúde / Farmácia", t = "expense", contact = "Farmácia"},
+            {kw = "FARMACIA", cat = "Saúde / Farmácia", t = "expense", contact = "Farmácia"},
+            {kw = "UNIMED", cat = "Saúde / Farmácia", t = "expense", contact = "Unimed"},
+            {kw = "NETFLIX", cat = "Assinaturas / Streaming", t = "expense", contact = "Netflix"},
+            {kw = "SPOTIFY", cat = "Assinaturas / Streaming", t = "expense", contact = "Spotify"},
+            {kw = "AMAZON PRIME", cat = "Assinaturas / Streaming", t = "expense", contact = "Amazon"},
+            {kw = "YOUTUBE", cat = "Assinaturas / Streaming", t = "expense", contact = "Google / YouTube"},
+            {kw = "OPENAI", cat = "Assinaturas / Streaming", t = "expense", contact = "OpenAI"},
+            {kw = "MERCADOLIVRE", cat = "Compras / Vestuário", t = "expense", contact = "Mercado Livre"},
+            {kw = "SHOPEE", cat = "Compras / Vestuário", t = "expense", contact = "Shopee"},
+            {kw = "AMAZON", cat = "Compras / Vestuário", t = "expense", contact = "Amazon"},
+            {kw = "IOF", cat = "Impostos / Taxas Bancárias", t = "expense", contact = "Banco"},
+            {kw = "TARIFA", cat = "Impostos / Taxas Bancárias", t = "expense", contact = "Banco"},
+            {kw = "IPTU", cat = "Impostos / Taxas Bancárias", t = "expense", contact = "Prefeitura"},
+            {kw = "IPVA", cat = "Impostos / Taxas Bancárias", t = "expense", contact = "Secretaria da Fazenda"},
+        ]
+        for _, r in rules do
+            local cid = self.db:value("SELECT id FROM categories WHERE name = ? LIMIT 1", r.cat)
+            if cid ~= nil and not is_error(cid) then
+                self.db:exec(
+                    "INSERT INTO categorization_rules (keyword, match_type, tx_type, category_id, contact, priority, created_at) VALUES (?, 'contains', ?, ?, ?, 10, ?)",
+                    r.kw, r.t, cid, r.contact, now
+                )?
+            end
+        end
+    end
+    return true
+end
+
+function Store.seed_demo_data(self, target_ym)
+    local ym = target_ym or string.sub(today_iso(), 1, 7)
+    local y, m = parse_ym(ym)
+    local cur_prefix = string.format("%04d-%02d", y, m)
+    local prev_y = y
+    local prev_m = m - 1
+    if prev_m < 1 then
+        prev_m = 12
+        prev_y -= 1
+    end
+    local prev_prefix = string.format("%04d-%02d", prev_y, prev_m)
+
+    local acc_count = self.db:value("SELECT count(*) FROM accounts WHERE active = 1")?
+    if acc_count == 0 then
+        local now = now_iso()
+        self.db:exec(
+            "INSERT INTO accounts (name, type, institution, bank_code, branch, account_number, pix_key, initial_balance, color, icon, credit_limit, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "Conta Corrente Principal", "checking", "Itaú Unibanco", "341", "0001", "12345-6", "daniel@email.com", 2500.00, "#10b981", "bank", 5000.00, now
+        )?
+        self.db:exec(
+            "INSERT INTO accounts (name, type, institution, bank_code, branch, account_number, pix_key, initial_balance, color, icon, credit_limit, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "Reserva / Poupança", "savings", "Nubank", "260", "0001", "987654-3", "", 10000.00, "#3b82f6", "piggy", 0.00, now
+        )?
+    end
+    local acc_main = self.db:value("SELECT id FROM accounts WHERE active = 1 ORDER BY id ASC LIMIT 1")? or 1
+    local function cat_id(name)
+        return self.db:value("SELECT id FROM categories WHERE name = ? LIMIT 1", name)
+    end
+
+    local c_sal = cat_id("Salário")
+    local c_free = cat_id("Freelance / Serviços")
+    local c_rend = cat_id("Rendimentos / Dividendos")
+    local c_alug = cat_id("Moradia / Aluguel")
+    local c_cond = cat_id("Condomínio / Contas Fixas")
+    local c_sup = cat_id("Supermercado")
+    local c_rest = cat_id("Restaurantes / Delivery")
+    local c_trans = cat_id("Transporte / Combustível")
+    local c_saude = cat_id("Saúde / Farmácia")
+    local c_stream = cat_id("Assinaturas / Streaming")
+    local c_lazer = cat_id("Lazer / Entretenimento")
+
+    -- Regras recorrentes (Fixas)
+    local rec_count = self.db:value("SELECT count(*) FROM recurring_rules WHERE active = 1")?
+    if rec_count == 0 then
+        local recs = [
+            {desc = "Salário Mensal", amt = 8500.00, t = "income", cid = c_sal, day = 5, pm = "transfer", contact = "Empresa Tech Ltda", auto = 0},
+            {desc = "Aluguel do Apartamento", amt = 2200.00, t = "expense", cid = c_alug, day = 6, pm = "boleto", contact = "Imobiliária Central", auto = 0},
+            {desc = "Condomínio Edifício Solar", amt = 650.00, t = "expense", cid = c_cond, day = 9, pm = "boleto", contact = "Condomínio", auto = 0},
+            {desc = "Internet Fibra 600Mb Vivo", amt = 129.90, t = "expense", cid = c_cond, day = 10, pm = "boleto", contact = "Vivo Fibra", auto = 0},
+            {desc = "Conta de Energia Elétrica", amt = 245.00, t = "expense", cid = c_cond, day = 15, pm = "pix", contact = "Concessionária Energia", auto = 0},
+            {desc = "Plano de Saúde Unimed", amt = 580.00, t = "expense", cid = c_saude, day = 20, pm = "boleto", contact = "Unimed", auto = 0},
+            {desc = "Assinatura Netflix + Spotify", amt = 77.80, t = "expense", cid = c_stream, day = 22, pm = "credit_card", contact = "Streaming", auto = 1},
+        ]
+        for _, r in recs do
+            self.db:exec(
+                `INSERT INTO recurring_rules (
+                    description, amount, type, account_id, category_id, payment_method,
+                    contact, notes, frequency, day_of_month, start_date, auto_pay, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Conta recorrente mensal', 'monthly', ?, ?, ?, ?)`,
+                r.desc, r.amt, r.t, acc_main, r.cid, r.pm, r.contact, r.day, `${prev_prefix}-01`, r.auto, now_iso()
+            )?
+        end
+    end
+
+    -- Gera recorrências do mês anterior e atual
+    self:generate_recurring_for_month(prev_prefix)?
+    self:generate_recurring_for_month(cur_prefix)?
+
+    -- Marca as recorrências do mês anterior como pagas
+    self.db:exec(
+        "UPDATE transactions SET status = 'paid', payment_date = due_date WHERE due_date LIKE ? AND status = 'pending'",
+        `${prev_prefix}-%`
+    )?
+    -- Marca salário e aluguel do início do mês atual como pagos
+    self.db:exec(
+        "UPDATE transactions SET status = 'paid', payment_date = due_date WHERE due_date <= ? AND due_date >= ? AND description IN ('Salário Mensal', 'Aluguel do Apartamento')",
+        `${cur_prefix}-07`, `${cur_prefix}-01`
+    )?
+
+    -- Lançamentos avulsos (contas a pagar e a receber no mês atual)
+    local extras = [
+        {desc = "Compras Supermercado Mensal", amt = 780.50, t = "expense", st = "paid", d = `${cur_prefix}-04`, cid = c_sup, pm = "debit_card", contact = "Supermercado"},
+        {desc = "Projeto Consultoria Backend (A Receber)", amt = 1800.00, t = "income", st = "pending", d = `${cur_prefix}-15`, cid = c_free, pm = "pix", contact = "Cliente Alpha"},
+        {desc = "Dividendos FIIs e Ações", amt = 340.00, t = "income", st = "paid", d = `${cur_prefix}-12`, cid = c_rend, pm = "transfer", contact = "B3 / Corretora"},
+        {desc = "Jantar Fim de Semana", amt = 165.00, t = "expense", st = "paid", d = `${cur_prefix}-11`, cid = c_rest, pm = "credit_card", contact = "Restaurante"},
+        {desc = "Abastecimento Combustível", amt = 220.00, t = "expense", st = "paid", d = `${cur_prefix}-13`, cid = c_trans, pm = "pix", contact = "Posto Shell"},
+        {desc = "Manutenção Preventiva Carro", amt = 450.00, t = "expense", st = "pending", d = `${cur_prefix}-25`, cid = c_trans, pm = "pix", contact = "Oficina AutoCenter"},
+        {desc = "Freelance Landing Page (2ª Parcela)", amt = 1400.00, t = "income", st = "pending", d = `${cur_prefix}-28`, cid = c_free, pm = "pix", contact = "Agência Digital"},
+        {desc = "Cinema e Lazer em Família", amt = 140.00, t = "expense", st = "paid", d = `${cur_prefix}-16`, cid = c_lazer, pm = "pix", contact = "Cinema"},
+    ]
+    for _, ex in extras do
+        self:create_transaction({
+            description = ex.desc,
+            amount = ex.amt,
+            type = ex.t,
+            status = ex.st,
+            due_date = ex.d,
+            payment_date = (ex.st == "paid") and ex.d or nil,
+            account_id = acc_main,
+            category_id = ex.cid,
+            payment_method = ex.pm,
+            contact = ex.contact,
+        })?
+    end
+
+    -- Metas financeiras
+    local g_count = self.db:value("SELECT count(*) FROM goals")?
+    if g_count == 0 then
+        self:create_goal({
+            name = "Reserva de Emergência (6 meses)",
+            target_amount = 30000.00,
+            current_amount = 14500.00,
+            deadline = `${y + 1}-06-30`,
+            color = "#10b981",
+            icon = "shield",
+            notes = "CDB Liquidez Diária 100% CDI",
+        })?
+        self:create_goal({
+            name = "Viagem de Férias",
+            target_amount = 8000.00,
+            current_amount = 3200.00,
+            deadline = `${y + 1}-01-15`,
+            color = "#3b82f6",
+            icon = "plane",
+            notes = "Passagens e hospedagem",
+        })?
+        self:create_goal({
+            name = "Troca de Notebook / Setup",
+            target_amount = 6500.00,
+            current_amount = 4800.00,
+            deadline = `${y}-12-20`,
+            color = "#8b5cf6",
+            icon = "laptop",
+            notes = "Fundo para equipamento de trabalho",
+        })?
+    end
+
+    return {ok = true}
+end
+
+function Store.clear_all_transactions(self)
+    self.db:exec("DELETE FROM transactions")?
+    self.db:exec("DELETE FROM recurring_rules")?
+    self.db:exec("DELETE FROM goals")?
+    self.db:exec("DELETE FROM accounts")?
+    return {ok = true}
+end
+
+-- ---- ACCOUNTS ----
+
+function Store.list_accounts(self)
+    local rows = self.db:query("SELECT * FROM accounts WHERE active = 1 ORDER BY id ASC")?
+    for _, acc in rows do
+        acc.current_balance = self:account_balance(acc.id, false)?
+        acc.projected_balance = self:account_balance(acc.id, true)?
+        acc.income_total = self.db:value(
+            "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'income' AND status = 'paid'",
+            acc.id
+        )? or 0.0
+        acc.expense_total = self.db:value(
+            "SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'expense' AND status = 'paid'",
+            acc.id
+        )? or 0.0
+        acc.pending_count = self.db:value(
+            "SELECT count(*) FROM transactions WHERE (account_id = ? OR destination_account_id = ?) AND status = 'pending'",
+            acc.id, acc.id
+        )? or 0
+    end
+    return rows
+end
+
+function Store.account_balance(self, account_id, include_pending)
+    local row = self.db:row("SELECT initial_balance FROM accounts WHERE id = ?", account_id)?
+    if row == nil then return 0.0 end
+    local base = row.initial_balance or 0.0
+
+    local status_clause = "status = 'paid'"
+    if include_pending then
+        status_clause = "status IN ('paid', 'pending')"
+    end
+
+    local inc = self.db:value(
+        `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'income' AND ${status_clause}`,
+        account_id
+    )?
+    local exp = self.db:value(
+        `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'expense' AND ${status_clause}`,
+        account_id
+    )?
+    local tr_out = self.db:value(
+        `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'transfer' AND ${status_clause}`,
+        account_id
+    )?
+    local tr_in = self.db:value(
+        `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE destination_account_id = ? AND type = 'transfer' AND ${status_clause}`,
+        account_id
+    )?
+
+    return round2(base + (inc or 0.0) - (exp or 0.0) - (tr_out or 0.0) + (tr_in or 0.0))
+end
+
+function Store.account_balance_before(self, account_id, date_str, include_pending)
+    local sql_acc = "SELECT COALESCE(SUM(initial_balance), 0.0) FROM accounts WHERE active = 1"
+    local params_acc = []
+    if account_id ~= nil and account_id > 0 then
+        sql_acc = "SELECT COALESCE(initial_balance, 0.0) FROM accounts WHERE id = ?"
+        params_acc[] = account_id
+    end
+    local base = self.db:value(sql_acc, params_acc)? or 0.0
+
+    local status_clause = "status = 'paid'"
+    local date_col = "COALESCE(payment_date, due_date)"
+    if include_pending then
+        status_clause = "status IN ('paid', 'pending')"
+        date_col = "CASE WHEN status = 'paid' THEN COALESCE(payment_date, due_date) ELSE due_date END"
+    end
+
+    if account_id ~= nil and account_id > 0 then
+        local inc = self.db:value(
+            `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'income' AND ${status_clause} AND ${date_col} < ?`,
+            account_id, date_str
+        )?
+        local exp = self.db:value(
+            `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'expense' AND ${status_clause} AND ${date_col} < ?`,
+            account_id, date_str
+        )?
+        local tr_out = self.db:value(
+            `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE account_id = ? AND type = 'transfer' AND ${status_clause} AND ${date_col} < ?`,
+            account_id, date_str
+        )?
+        local tr_in = self.db:value(
+            `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE destination_account_id = ? AND type = 'transfer' AND ${status_clause} AND ${date_col} < ?`,
+            account_id, date_str
+        )?
+        return round2(base + (inc or 0.0) - (exp or 0.0) - (tr_out or 0.0) + (tr_in or 0.0))
+    else
+        local inc = self.db:value(
+            `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'income' AND ${status_clause} AND ${date_col} < ?`,
+            date_str
+        )?
+        local exp = self.db:value(
+            `SELECT COALESCE(SUM(amount - discount + interest), 0.0) FROM transactions WHERE type = 'expense' AND ${status_clause} AND ${date_col} < ?`,
+            date_str
+        )?
+        return round2(base + (inc or 0.0) - (exp or 0.0))
+    end
+end
+
+function Store.create_account(self, data)
+    local name = string.trim(data.name or "")
+    if name == "" then return error("O nome da conta é obrigatório") end
+    local acc_type = data.type or "checking"
+    local inst = string.trim(data.institution or "")
+    local bank_code = string.trim(data.bank_code or "")
+    local branch = string.trim(data.branch or "")
+    local account_number = string.trim(data.account_number or "")
+    local pix_key = string.trim(data.pix_key or "")
+    local init_bal = round2(data.initial_balance or 0.0)
+    local color = data.color or "#10b981"
+    local icon = data.icon or "bank"
+    local limit = round2(data.credit_limit or 0.0)
+    local closing_day = toint(data.closing_day) or 1
+    local due_day = toint(data.due_day) or 10
+    local include_in_total = (data.include_in_total == false or data.include_in_total == 0) and 0 or 1
+    local notes = string.trim(data.notes or "")
+
+    self.db:exec(
+        `INSERT INTO accounts (
+            name, type, institution, bank_code, branch, account_number, pix_key,
+            initial_balance, color, icon, credit_limit, closing_day, due_day,
+            include_in_total, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        name, acc_type, inst, bank_code, branch, account_number, pix_key,
+        init_bal, color, icon, limit, closing_day, due_day,
+        include_in_total, notes, now_iso()
+    )?
+    local id = self.db:last_insert_id()
+    return self.db:row("SELECT * FROM accounts WHERE id = ?", id)
+end
+
+function Store.update_account(self, id, data)
+    local existing = self.db:row("SELECT * FROM accounts WHERE id = ?", id)?
+    if existing == nil then return error("Conta não encontrada") end
+    local name = string.trim(data.name or existing.name)
+    local acc_type = data.type or existing.type
+    local inst = data.institution ~= nil and string.trim(data.institution) or existing.institution
+    local bank_code = data.bank_code ~= nil and string.trim(data.bank_code) or (existing.bank_code or "")
+    local branch = data.branch ~= nil and string.trim(data.branch) or (existing.branch or "")
+    local account_number = data.account_number ~= nil and string.trim(data.account_number) or (existing.account_number or "")
+    local pix_key = data.pix_key ~= nil and string.trim(data.pix_key) or (existing.pix_key or "")
+    local init_bal = data.initial_balance ~= nil and round2(data.initial_balance) or existing.initial_balance
+    local color = data.color or existing.color
+    local icon = data.icon or existing.icon
+    local limit = data.credit_limit ~= nil and round2(data.credit_limit) or existing.credit_limit
+    local closing_day = toint(data.closing_day) or existing.closing_day
+    local due_day = toint(data.due_day) or existing.due_day
+    local include_in_total = existing.include_in_total
+    if data.include_in_total ~= nil then
+        include_in_total = (data.include_in_total == false or data.include_in_total == 0) and 0 or 1
+    end
+    local notes = data.notes ~= nil and string.trim(data.notes) or (existing.notes or "")
+
+    self.db:exec(
+        `UPDATE accounts SET
+            name = ?, type = ?, institution = ?, bank_code = ?, branch = ?,
+            account_number = ?, pix_key = ?, initial_balance = ?, color = ?, icon = ?,
+            credit_limit = ?, closing_day = ?, due_day = ?, include_in_total = ?, notes = ?
+         WHERE id = ?`,
+        name, acc_type, inst, bank_code, branch,
+        account_number, pix_key, init_bal, color, icon,
+        limit, closing_day, due_day, include_in_total, notes, id
+    )?
+    return self.db:row("SELECT * FROM accounts WHERE id = ?", id)
+end
+
+-- Ajusta o saldo atual de uma conta bancária criando um lançamento de reajuste se houver diferença
+function Store.adjust_account_balance(self, id, target_balance, reason)
+    local existing = self.db:row("SELECT * FROM accounts WHERE id = ?", id)?
+    if existing == nil then return error("Conta não encontrada") end
+    local cur = self:account_balance(id, false)?
+    local target = round2(target_balance)
+    local diff = round2(target - cur)
+    if math.abs(diff) < 0.01 then
+        return {ok = true, adjusted = 0.0, current_balance = cur}
+    end
+    local tx_type = (diff > 0) and "income" or "expense"
+    local desc = string.trim(reason or "")
+    if desc == "" then
+        desc = "Ajuste de Saldo Bancário"
+    end
+    self:create_transaction({
+        description = desc,
+        amount = math.abs(diff),
+        type = tx_type,
+        status = "paid",
+        due_date = today_iso(),
+        payment_date = today_iso(),
+        account_id = id,
+        payment_method = "transfer",
+        notes = `Saldo anterior: R$ ${string.format("%.2f", cur)} → Novo saldo: R$ ${string.format("%.2f", target)}`,
+        reconciled = true,
+    })?
+    return {ok = true, adjusted = diff, current_balance = self:account_balance(id, false)?}
+end
+
+function Store.delete_account(self, id)
+    self.db:exec("UPDATE accounts SET active = 0 WHERE id = ?", id)?
+    return {ok = true}
+end
+
+-- ---- CATEGORIES ----
+
+function Store.list_categories(self, cat_type)
+    if cat_type ~= nil and cat_type ~= "" then
+        return self.db:query("SELECT * FROM categories WHERE active = 1 AND type = ? ORDER BY name ASC", cat_type)
+    end
+    return self.db:query("SELECT * FROM categories WHERE active = 1 ORDER BY type DESC, name ASC")
+end
+
+function Store.create_category(self, data)
+    local name = string.trim(data.name or "")
+    if name == "" then return error("O nome da categoria é obrigatório") end
+    local ctype = data.type or "expense"
+    if ctype ~= "income" and ctype ~= "expense" then
+        return error("Tipo de categoria inválido (use 'income' ou 'expense')")
+    end
+    local color = data.color or "#6366f1"
+    local icon = data.icon or "tag"
+    local budget = round2(data.budget_monthly or 0.0)
+
+    self.db:exec(
+        "INSERT INTO categories (name, type, color, icon, budget_monthly, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        name, ctype, color, icon, budget, now_iso()
+    )?
+    local id = self.db:last_insert_id()
+    return self.db:row("SELECT * FROM categories WHERE id = ?", id)
+end
+
+function Store.update_category(self, id, data)
+    local existing = self.db:row("SELECT * FROM categories WHERE id = ?", id)?
+    if existing == nil then return error("Categoria não encontrada") end
+    local name = string.trim(data.name or existing.name)
+    local ctype = data.type or existing.type
+    local color = data.color or existing.color
+    local icon = data.icon or existing.icon
+    local budget = data.budget_monthly ~= nil and round2(data.budget_monthly) or existing.budget_monthly
+
+    self.db:exec(
+        "UPDATE categories SET name = ?, type = ?, color = ?, icon = ?, budget_monthly = ? WHERE id = ?",
+        name, ctype, color, icon, budget, id
+    )?
+    return self.db:row("SELECT * FROM categories WHERE id = ?", id)
+end
+
+function Store.delete_category(self, id)
+    self.db:exec("UPDATE categories SET active = 0 WHERE id = ?", id)?
+    return {ok = true}
+end
+
+-- ---- TRANSACTIONS (CONTAS A PAGAR E A RECEBER) ----
+
+function Store.list_transactions(self, filters)
+    filters = filters or {}
+    local where = ["1 = 1"]
+    local params = []
+
+    if filters.month ~= nil and filters.month ~= "" then
+        local start_d, end_d = month_bounds(filters.month)
+        where[] = "t.due_date >= ? AND t.due_date <= ?"
+        params[] = start_d
+        params[] = end_d
+    else
+        if filters.start_date ~= nil and filters.start_date ~= "" then
+            where[] = "t.due_date >= ?"
+            params[] = filters.start_date
+        end
+        if filters.end_date ~= nil and filters.end_date ~= "" then
+            where[] = "t.due_date <= ?"
+            params[] = filters.end_date
+        end
+    end
+
+    if filters.type ~= nil and filters.type ~= "" and filters.type ~= "all" then
+        where[] = "t.type = ?"
+        params[] = filters.type
+    end
+
+    if filters.status ~= nil and filters.status ~= "" and filters.status ~= "all" then
+        if filters.status == "overdue" then
+            where[] = "t.status = 'pending' AND t.due_date < ?"
+            params[] = today_iso()
+        else
+            where[] = "t.status = ?"
+            params[] = filters.status
+        end
+    end
+
+    if filters.category_id ~= nil and tostring(filters.category_id) ~= "" and toint(filters.category_id) ~= nil and toint(filters.category_id) > 0 then
+        where[] = "t.category_id = ?"
+        params[] = toint(filters.category_id)
+    end
+
+    if filters.account_id ~= nil and tostring(filters.account_id) ~= "" and toint(filters.account_id) ~= nil and toint(filters.account_id) > 0 then
+        local aid = toint(filters.account_id)
+        where[] = "(t.account_id = ? OR t.destination_account_id = ?)"
+        params[] = aid
+        params[] = aid
+    end
+
+    if filters.search ~= nil and string.trim(filters.search) ~= "" then
+        local q = "%" .. string.trim(filters.search) .. "%"
+        where[] = "(t.description LIKE ? OR t.contact LIKE ? OR t.notes LIKE ? OR t.tags LIKE ?)"
+        params[] = q
+        params[] = q
+        params[] = q
+        params[] = q
+    end
+
+    local sql = `
+        SELECT t.*,
+               (t.amount - t.discount + t.interest) AS final_amount,
+               c.name AS category_name,
+               c.color AS category_color,
+               c.icon AS category_icon,
+               a.name AS account_name,
+               a.color AS account_color,
+               da.name AS destination_account_name
+        FROM transactions t
+        LEFT JOIN categories c ON c.id = t.category_id
+        LEFT JOIN accounts a ON a.id = t.account_id
+        LEFT JOIN accounts da ON da.id = t.destination_account_id
+        WHERE ${string.join(where, " AND ")}
+        ORDER BY t.due_date ASC, t.id DESC
+    `
+    local rows = self.db:query(sql, params)?
+    local today = today_iso()
+    for _, r in rows do
+        r.final_amount = round2(r.final_amount or r.amount)
+        r.is_overdue = (r.status == "pending" and r.due_date < today)
+    end
+    return rows
+end
+
+local function add_months_to_date(date_str, months_to_add)
+    local t = time.parse(date_str, "2006-01-02")
+    if is_error(t) then
+        return today_iso()
+    end
+    local y = t:year()
+    local m = t:month() + months_to_add
+    local d = t:day()
+    while m > 12 do
+        m -= 12
+        y += 1
+    end
+    while m < 1 do
+        m += 12
+        y -= 1
+    end
+    local max_d = days_in_month(y, m)
+    if d > max_d then d = max_d end
+    return string.format("%04d-%02d-%02d", y, m, d)
+end
+
+M.add_months_to_date = add_months_to_date
+
+function Store.create_transaction(self, data)
+    local desc = string.trim(data.description or "")
+    if desc == "" then return error("A descrição do lançamento é obrigatória") end
+    local amount = round2(data.amount)
+    if amount <= 0 then return error("O valor deve ser maior que zero") end
+
+    local tx_type = data.type or "expense"
+    if tx_type ~= "income" and tx_type ~= "expense" and tx_type ~= "transfer" then
+        return error("Tipo inválido (use income, expense ou transfer)")
+    end
+
+    local status = data.status or "pending"
+    local due_date = data.due_date or today_iso()
+    local payment_date = data.payment_date
+    if status == "paid" and (payment_date == nil or payment_date == "") then
+        payment_date = due_date
+    elseif status ~= "paid" then
+        payment_date = nil
+    end
+
+    local competence_date = data.competence_date or due_date
+    local account_id = toint(data.account_id)
+    if account_id ~= nil and account_id <= 0 then account_id = nil end
+    if account_id == nil then
+        local first_acc = self.db:value("SELECT id FROM accounts WHERE active = 1 ORDER BY id ASC LIMIT 1")
+        if not is_error(first_acc) then account_id = first_acc end
+    end
+
+    local dest_account_id = toint(data.destination_account_id)
+    if tx_type == "transfer" then
+        if dest_account_id == nil or dest_account_id <= 0 then
+            return error("Conta de destino é obrigatória para transferências")
+        end
+        if dest_account_id == account_id then
+            return error("A conta de destino deve ser diferente da conta de origem")
+        end
+    else
+        dest_account_id = nil
+    end
+
+    local category_id = toint(data.category_id)
+    if category_id ~= nil and category_id <= 0 then category_id = nil end
+
+    local discount = round2(data.discount or 0.0)
+    local interest = round2(data.interest or 0.0)
+    local payment_method = data.payment_method or "pix"
+    local contact = string.trim(data.contact or "")
+    local notes = string.trim(data.notes or "")
+    local tags = string.trim(data.tags or "")
+    local bank_fitid = data.bank_fitid
+    local reconciled = data.reconciled and 1 or 0
+    local now = now_iso()
+
+    local installments = toint(data.installments) or 1
+    if installments < 1 then installments = 1 end
+    if installments > 120 then installments = 120 end
+
+    if installments == 1 then
+        self.db:exec(
+            `INSERT INTO transactions (
+                description, amount, discount, interest, type, status,
+                due_date, payment_date, competence_date, account_id, destination_account_id,
+                category_id, payment_method, contact, notes, tags, bank_fitid, reconciled, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            desc, amount, discount, interest, tx_type, status,
+            due_date, payment_date, competence_date, account_id, dest_account_id,
+            category_id, payment_method, contact, notes, tags, bank_fitid, reconciled, now
+        )?
+        local id = self.db:last_insert_id()
+        return self.db:row("SELECT * FROM transactions WHERE id = ?", id)
+    else
+        local group_id = os.uuid()
+        local created_ids = []
+        self.db:transaction(function(db)
+            for i = 1, installments do
+                local inst_due = add_months_to_date(due_date, i - 1)
+                local inst_status = (i == 1) and status or "pending"
+                local inst_pay_date = (inst_status == "paid") and (payment_date or inst_due) or nil
+                local inst_desc = `${desc} (${i}/${installments})`
+                db:exec(
+                    `INSERT INTO transactions (
+                        description, amount, discount, interest, type, status,
+                        due_date, payment_date, competence_date, account_id, destination_account_id,
+                        category_id, payment_method, contact, notes, tags,
+                        installment_group, installment_number, installment_total, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    inst_desc, amount, (i == 1) and discount or 0.0, (i == 1) and interest or 0.0,
+                    tx_type, inst_status, inst_due, inst_pay_date, competence_date,
+                    account_id, dest_account_id, category_id, payment_method,
+                    contact, notes, tags, group_id, i, installments, now
+                )?
+                created_ids[] = db:last_insert_id()
+            end
+            return true
+        end)?
+        return self.db:row("SELECT * FROM transactions WHERE id = ?", created_ids[0])
+    end
+end
+
+function Store.update_transaction(self, id, data)
+    local existing = self.db:row("SELECT * FROM transactions WHERE id = ?", id)?
+    if existing == nil then return error("Lançamento não encontrado") end
+
+    local desc = data.description ~= nil and string.trim(data.description) or existing.description
+    if desc == "" then return error("A descrição é obrigatória") end
+    local amount = data.amount ~= nil and round2(data.amount) or existing.amount
+    if amount <= 0 then return error("O valor deve ser maior que zero") end
+
+    local discount = data.discount ~= nil and round2(data.discount) or existing.discount
+    local interest = data.interest ~= nil and round2(data.interest) or existing.interest
+    local tx_type = data.type or existing.type
+    local status = data.status or existing.status
+    local due_date = data.due_date or existing.due_date
+    local payment_date = data.payment_date ~= nil and data.payment_date or existing.payment_date
+    if status == "paid" and (payment_date == nil or payment_date == "") then
+        payment_date = today_iso()
+    elseif status ~= "paid" then
+        payment_date = nil
+    end
+
+    local competence_date = data.competence_date or existing.competence_date or due_date
+    local account_id = data.account_id ~= nil and toint(data.account_id) or existing.account_id
+    if account_id ~= nil and account_id <= 0 then account_id = existing.account_id end
+    local dest_account_id = data.destination_account_id ~= nil and toint(data.destination_account_id) or existing.destination_account_id
+    if dest_account_id ~= nil and dest_account_id <= 0 then dest_account_id = nil end
+    if tx_type ~= "transfer" then dest_account_id = nil end
+
+    local category_id = existing.category_id
+    if data.category_id ~= nil then
+        local cid = toint(data.category_id)
+        category_id = (cid ~= nil and cid > 0) and cid or nil
+    end
+
+    local payment_method = data.payment_method or existing.payment_method
+    local contact = data.contact ~= nil and string.trim(data.contact) or existing.contact
+    local notes = data.notes ~= nil and string.trim(data.notes) or existing.notes
+    local tags = data.tags ~= nil and string.trim(data.tags) or existing.tags
+
+    self.db:exec(
+        `UPDATE transactions SET
+            description = ?, amount = ?, discount = ?, interest = ?, type = ?, status = ?,
+            due_date = ?, payment_date = ?, competence_date = ?, account_id = ?, destination_account_id = ?,
+            category_id = ?, payment_method = ?, contact = ?, notes = ?, tags = ?
+         WHERE id = ?`,
+        desc, amount, discount, interest, tx_type, status,
+        due_date, payment_date, competence_date, account_id, dest_account_id,
+        category_id, payment_method, contact, notes, tags, id
+    )?
+    return self.db:row("SELECT * FROM transactions WHERE id = ?", id)
+end
+
+-- Dar baixa (pagar conta a pagar ou receber conta a receber)
+function Store.pay_transaction(self, id, opts)
+    opts = opts or {}
+    local existing = self.db:row("SELECT * FROM transactions WHERE id = ?", id)?
+    if existing == nil then return error("Lançamento não encontrado") end
+
+    local pay_date = opts.payment_date or today_iso()
+    if pay_date == "" then pay_date = today_iso() end
+    local account_id = toint(opts.account_id)
+    if account_id == nil or account_id <= 0 then account_id = existing.account_id end
+    local discount = opts.discount ~= nil and round2(opts.discount) or existing.discount
+    local interest = opts.interest ~= nil and round2(opts.interest) or existing.interest
+    local amount = opts.amount ~= nil and round2(opts.amount) or existing.amount
+
+    self.db:exec(
+        "UPDATE transactions SET status = 'paid', payment_date = ?, account_id = ?, amount = ?, discount = ?, interest = ? WHERE id = ?",
+        pay_date, account_id, amount, discount, interest, id
+    )?
+    return self.db:row("SELECT * FROM transactions WHERE id = ?", id)
+end
+
+function Store.reopen_transaction(self, id)
+    local existing = self.db:row("SELECT * FROM transactions WHERE id = ?", id)?
+    if existing == nil then return error("Lançamento não encontrado") end
+    self.db:exec("UPDATE transactions SET status = 'pending', payment_date = NULL WHERE id = ?", id)?
+    return self.db:row("SELECT * FROM transactions WHERE id = ?", id)
+end
+
+function Store.delete_transaction(self, id)
+    self.db:exec("DELETE FROM transactions WHERE id = ?", id)?
+    return {ok = true}
+end
+
+-- ---- RECURRING RULES (CONTAS RECORRENTES / FIXAS) ----
+
+function Store.list_recurring(self)
+    local sql = `
+        SELECT r.*,
+               c.name AS category_name,
+               c.color AS category_color,
+               a.name AS account_name
+        FROM recurring_rules r
+        LEFT JOIN categories c ON c.id = r.category_id
+        LEFT JOIN accounts a ON a.id = r.account_id
+        WHERE r.active = 1
+        ORDER BY r.day_of_month ASC, r.description ASC
+    `
+    return self.db:query(sql)
+end
+
+function Store.create_recurring(self, data)
+    local desc = string.trim(data.description or "")
+    if desc == "" then return error("A descrição da recorrência é obrigatória") end
+    local amount = round2(data.amount)
+    if amount <= 0 then return error("O valor deve ser maior que zero") end
+    local rtype = data.type or "expense"
+    local account_id = toint(data.account_id)
+    if account_id ~= nil and account_id <= 0 then account_id = nil end
+    if account_id == nil then
+        local first_acc = self.db:value("SELECT id FROM accounts WHERE active = 1 ORDER BY id ASC LIMIT 1")
+        if not is_error(first_acc) then account_id = first_acc end
+    end
+    local category_id = toint(data.category_id)
+    if category_id ~= nil and category_id <= 0 then category_id = nil end
+
+    local payment_method = data.payment_method or "pix"
+    local contact = string.trim(data.contact or "")
+    local notes = string.trim(data.notes or "")
+    local frequency = data.frequency or "monthly"
+    local day_of_month = toint(data.day_of_month) or 5
+    if day_of_month < 1 then day_of_month = 1 end
+    if day_of_month > 31 then day_of_month = 31 end
+    local start_date = data.start_date or today_iso()
+    local end_date = (data.end_date ~= nil and data.end_date ~= "") and data.end_date or nil
+    local auto_pay = (data.auto_pay == true or data.auto_pay == 1) and 1 or 0
+
+    self.db:exec(
+        `INSERT INTO recurring_rules (
+            description, amount, type, account_id, category_id, payment_method,
+            contact, notes, frequency, day_of_month, start_date, end_date, auto_pay, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        desc, amount, rtype, account_id, category_id, payment_method,
+        contact, notes, frequency, day_of_month, start_date, end_date, auto_pay, now_iso()
+    )?
+    local id = self.db:last_insert_id()
+    -- Materialize for the current month right away
+    local cur_ym = string.sub(start_date, 1, 7)
+    self:generate_recurring_for_month(cur_ym)?
+    return self.db:row("SELECT * FROM recurring_rules WHERE id = ?", id)
+end
+
+function Store.update_recurring(self, id, data)
+    local existing = self.db:row("SELECT * FROM recurring_rules WHERE id = ?", id)?
+    if existing == nil then return error("Regra recorrente não encontrada") end
+
+    local desc = data.description ~= nil and string.trim(data.description) or existing.description
+    local amount = data.amount ~= nil and round2(data.amount) or existing.amount
+    local rtype = data.type or existing.type
+    local account_id = data.account_id ~= nil and toint(data.account_id) or existing.account_id
+    if account_id ~= nil and account_id <= 0 then account_id = nil end
+    local category_id = data.category_id ~= nil and toint(data.category_id) or existing.category_id
+    if category_id ~= nil and category_id <= 0 then category_id = nil end
+    local payment_method = data.payment_method or existing.payment_method
+    local contact = data.contact ~= nil and string.trim(data.contact) or existing.contact
+    local notes = data.notes ~= nil and string.trim(data.notes) or existing.notes
+    local frequency = data.frequency or existing.frequency
+    local day_of_month = toint(data.day_of_month) or existing.day_of_month
+    local start_date = data.start_date or existing.start_date
+    local end_date = data.end_date ~= nil and (data.end_date ~= "" and data.end_date or nil) or existing.end_date
+    local auto_pay = data.auto_pay ~= nil and ((data.auto_pay == true or data.auto_pay == 1) and 1 or 0) or existing.auto_pay
+
+    self.db:exec(
+        `UPDATE recurring_rules SET
+            description = ?, amount = ?, type = ?, account_id = ?, category_id = ?,
+            payment_method = ?, contact = ?, notes = ?, frequency = ?, day_of_month = ?,
+            start_date = ?, end_date = ?, auto_pay = ?
+         WHERE id = ?`,
+        desc, amount, rtype, account_id, category_id,
+        payment_method, contact, notes, frequency, day_of_month,
+        start_date, end_date, auto_pay, id
+    )?
+    return self.db:row("SELECT * FROM recurring_rules WHERE id = ?", id)
+end
+
+function Store.delete_recurring(self, id)
+    self.db:exec("UPDATE recurring_rules SET active = 0 WHERE id = ?", id)?
+    return {ok = true}
+end
+
+-- Gera de forma idempotente os lançamentos recorrentes para um mês (ex: "2026-10")
+function Store.generate_recurring_for_month(self, ym)
+    local _, _, y, m, max_d = month_bounds(ym)
+    local period_ym = string.format("%04d-%02d", y, m)
+    local rules = self.db:query("SELECT * FROM recurring_rules WHERE active = 1")?
+    local generated = 0
+    local today = today_iso()
+    local now = now_iso()
+
+    for _, r in rules do
+        local start_ym = string.sub(r.start_date or "2000-01-01", 1, 7)
+        local end_ym = r.end_date and string.sub(r.end_date, 1, 7) or "9999-12"
+        if period_ym >= start_ym and period_ym <= end_ym then
+            local s_y, s_m = parse_ym(start_ym)
+            local months_diff = (y - s_y) * 12 + (m - s_m)
+            local should_run = false
+            local occurrences = []
+
+            if r.frequency == "monthly" then
+                should_run = true
+            elseif r.frequency == "bimonthly" then
+                should_run = (months_diff % 2 == 0)
+            elseif r.frequency == "quarterly" then
+                should_run = (months_diff % 3 == 0)
+            elseif r.frequency == "semiannual" then
+                should_run = (months_diff % 6 == 0)
+            elseif r.frequency == "yearly" then
+                should_run = (months_diff % 12 == 0)
+            elseif r.frequency == "weekly" then
+                should_run = true
+                local base_d = r.day_of_month
+                if base_d > 7 then base_d = ((base_d - 1) % 7) + 1 end
+                local cur_d = base_d
+                while cur_d <= max_d do
+                    occurrences[] = cur_d
+                    cur_d += 7
+                end
+            elseif r.frequency == "biweekly" then
+                should_run = true
+                local d1 = r.day_of_month
+                if d1 > 14 then d1 = 1 end
+                occurrences[] = d1
+                if d1 + 14 <= max_d then occurrences[] = d1 + 14 end
+            else
+                should_run = true
+            end
+
+            if should_run then
+                if len(occurrences) == 0 then
+                    local d = r.day_of_month
+                    if d > max_d then d = max_d end
+                    if d < 1 then d = 1 end
+                    occurrences[] = d
+                end
+
+                for idx, d in occurrences do
+                    local due_str = string.format("%04d-%02d-%02d", y, m, d)
+                    local period_key = (len(occurrences) > 1) and `${period_ym}#${idx + 1}` or period_ym
+                    if due_str >= (r.start_date or "2000-01-01") and (r.end_date == nil or due_str <= r.end_date) then
+                        local exists = self.db:value(
+                            "SELECT count(*) FROM transactions WHERE recurring_id = ? AND recurring_period = ?",
+                            r.id, period_key
+                        )?
+                        if exists == 0 then
+                            local st = "pending"
+                            local pay_d = nil
+                            if r.auto_pay == 1 and due_str <= today then
+                                st = "paid"
+                                pay_d = due_str
+                            end
+                            self.db:exec(
+                                `INSERT INTO transactions (
+                                    description, amount, type, status, due_date, payment_date, competence_date,
+                                    account_id, category_id, payment_method, contact, notes,
+                                    recurring_id, recurring_period, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                r.description, r.amount, r.type, st, due_str, pay_d, due_str,
+                                r.account_id, r.category_id, r.payment_method, r.contact, r.notes,
+                                r.id, period_key, now
+                            )?
+                            generated += 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return {generated = generated, month = period_ym}
+end
+
+-- ---- GOALS (METAS FINANCEIRAS) ----
+
+function Store.list_goals(self)
+    local rows = self.db:query("SELECT * FROM goals ORDER BY id ASC")?
+    for _, g in rows do
+        if g.target_amount > 0 then
+            g.progress_pct = round2((g.current_amount / g.target_amount) * 100.0)
+        else
+            g.progress_pct = 0.0
+        end
+    end
+    return rows
+end
+
+function Store.create_goal(self, data)
+    local name = string.trim(data.name or "")
+    if name == "" then return error("O nome da meta é obrigatório") end
+    local target = round2(data.target_amount)
+    if target <= 0 then return error("O valor alvo deve ser maior que zero") end
+    local current = round2(data.current_amount or 0.0)
+    local deadline = (data.deadline ~= nil and data.deadline ~= "") and data.deadline or nil
+    local color = data.color or "#3b82f6"
+    local icon = data.icon or "target"
+    local notes = string.trim(data.notes or "")
+
+    self.db:exec(
+        "INSERT INTO goals (name, target_amount, current_amount, deadline, color, icon, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        name, target, current, deadline, color, icon, notes, now_iso()
+    )?
+    local id = self.db:last_insert_id()
+    return self.db:row("SELECT * FROM goals WHERE id = ?", id)
+end
+
+function Store.contribute_goal(self, id, delta)
+    local g = self.db:row("SELECT * FROM goals WHERE id = ?", id)?
+    if g == nil then return error("Meta não encontrada") end
+    local new_val = round2(g.current_amount + round2(delta))
+    if new_val < 0 then new_val = 0.0 end
+    self.db:exec("UPDATE goals SET current_amount = ? WHERE id = ?", new_val, id)?
+    return self.db:row("SELECT * FROM goals WHERE id = ?", id)
+end
+
+function Store.delete_goal(self, id)
+    self.db:exec("DELETE FROM goals WHERE id = ?", id)?
+    return {ok = true}
+end
+
+-- ---- CATEGORIZATION RULES ----
+
+function Store.list_rules(self)
+    return self.db:query(`
+        SELECT r.*, c.name AS category_name, c.type AS category_type, c.color AS category_color
+        FROM categorization_rules r
+        JOIN categories c ON c.id = r.category_id
+        ORDER BY r.priority DESC, r.id ASC
+    `
+    )
+end
+
+function Store.create_rule(self, data)
+    local kw = string.upper(string.trim(data.keyword or ""))
+    if kw == "" then return error("A palavra-chave é obrigatória") end
+    local cid = tonumber(data.category_id)
+    if cid == nil or cid <= 0 then return error("Categoria é obrigatória") end
+    local cat = self.db:row("SELECT * FROM categories WHERE id = ?", cid)?
+    if cat == nil then return error("Categoria inválida") end
+    local contact = string.trim(data.contact or "")
+
+    self.db:exec(
+        "INSERT INTO categorization_rules (keyword, match_type, tx_type, category_id, contact, priority, created_at) VALUES (?, 'contains', ?, ?, ?, 20, ?)",
+        kw, cat.type, cid, contact, now_iso()
+    )?
+    local id = self.db:last_insert_id()
+    return self.db:row("SELECT * FROM categorization_rules WHERE id = ?", id)
+end
+
+function Store.delete_rule(self, id)
+    self.db:exec("DELETE FROM categorization_rules WHERE id = ?", id)?
+    return {ok = true}
+end
+
+function Store.match_category_for_description(self, description, tx_type)
+    local upper_desc = string.upper(description or "")
+    local rules = self:list_rules()?
+    for _, r in rules do
+        if (r.tx_type == nil or r.tx_type == "" or r.tx_type == tx_type) then
+            if string.contains(upper_desc, string.upper(r.keyword)) then
+                return {
+                    category_id = r.category_id,
+                    category_name = r.category_name,
+                    category_color = r.category_color,
+                    contact = r.contact,
+                    rule_keyword = r.keyword,
+                }
+            end
+        end
+    end
+    -- Fallback to "Outras Receitas" / "Outras Despesas"
+    local fallback_name = (tx_type == "income") and "Outras Receitas" or "Outras Despesas"
+    local fb = self.db:row("SELECT * FROM categories WHERE name = ? AND active = 1 LIMIT 1", fallback_name)?
+    if fb ~= nil then
+        return {
+            category_id = fb.id,
+            category_name = fb.name,
+            category_color = fb.color,
+            contact = "",
+            rule_keyword = nil,
+        }
+    end
+    return nil
+end
+
+return M

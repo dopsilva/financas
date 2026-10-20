@@ -1,0 +1,427 @@
+-- server.sea — Servidor HTTP e API REST JSON para o Sistema de Gestão Financeira Pessoal
+
+local http = require("../sea_vm/libs/http/http")
+local reports = require("./reports")
+local importer = require("./importer")
+
+local M = {}
+
+local function json_ok(data, status)
+    if is_error(data) then
+        return http.json({ok = false, error = data.message}, 400)
+    end
+    return http.json({ok = true, data = data}, status or 200)
+end
+
+local function json_err(msg, status)
+    return http.json({ok = false, error = msg}, status or 400)
+end
+
+local function parse_body(req)
+    local b = req:json()
+    if is_error(b) or b == nil then
+        return error("Corpo JSON inválido")
+    end
+    return b
+end
+
+function M.build_router(store, public_dir)
+    public_dir = public_dir or path.join(path.dirname(os.args[0] or "main.sea"), "public")
+    if not fs.isdir(public_dir) then
+        public_dir = "public"
+    end
+
+    local mu = sync.mutex()
+    local function locked(fn)
+        mu:acquire()
+        defer mu:release()
+        return fn()
+    end
+
+    local r = http.router()
+
+    -- ---- DASHBOARD & CASHFLOW ----
+    r.get("/api/dashboard", function(req)
+        local ym = req.query["month"]
+        local res = locked(function()
+            return reports.get_dashboard(store, ym)
+        end)
+        return json_ok(res)
+    end)
+
+    r.get("/api/cashflow", function(req)
+        local opts = {
+            mode = req.query["mode"] or "daily",
+            month = req.query["month"],
+            start_date = req.query["start_date"],
+            end_date = req.query["end_date"],
+            account_id = req.query["account_id"],
+            months = req.query["months"],
+        }
+        local res = locked(function()
+            return reports.get_cashflow(store, opts)
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- ACCOUNTS ----
+    r.get("/api/accounts", function(_)
+        local res = locked(function()
+            return store:list_accounts()
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/accounts", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:create_account(body)
+        end)
+        return json_ok(res, 201)
+    end)
+
+    r.put("/api/accounts/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:update_account(id, body)
+        end)
+        return json_ok(res)
+    end)
+
+    r.delete("/api/accounts/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:delete_account(id)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/accounts/:id/adjust", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:adjust_account_balance(id, body.target_balance, body.reason)
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- CATEGORIES ----
+    r.get("/api/categories", function(req)
+        local ctype = req.query["type"]
+        local res = locked(function()
+            return store:list_categories(ctype)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/categories", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:create_category(body)
+        end)
+        return json_ok(res, 201)
+    end)
+
+    r.put("/api/categories/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:update_category(id, body)
+        end)
+        return json_ok(res)
+    end)
+
+    r.delete("/api/categories/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:delete_category(id)
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- TRANSACTIONS (CONTAS A PAGAR E A RECEBER) ----
+    r.get("/api/transactions", function(req)
+        local filters = {
+            month = req.query["month"],
+            start_date = req.query["start_date"],
+            end_date = req.query["end_date"],
+            type = req.query["type"],
+            status = req.query["status"],
+            category_id = req.query["category_id"],
+            account_id = req.query["account_id"],
+            search = req.query["search"],
+        }
+        local res = locked(function()
+            if filters.month ~= nil and filters.month ~= "" then
+                store:generate_recurring_for_month(filters.month)?
+            end
+            return store:list_transactions(filters)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/transactions", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:create_transaction(body)
+        end)
+        return json_ok(res, 201)
+    end)
+
+    r.put("/api/transactions/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:update_transaction(id, body)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/transactions/:id/pay", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = req.body ~= "" and req:json() or {}
+        if is_error(body) then body = {} end
+        local res = locked(function()
+            return store:pay_transaction(id, body)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/transactions/:id/reopen", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:reopen_transaction(id)
+        end)
+        return json_ok(res)
+    end)
+
+    r.delete("/api/transactions/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:delete_transaction(id)
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- RECURRING RULES (CONTAS RECORRENTES / FIXAS) ----
+    r.get("/api/recurring", function(_)
+        local res = locked(function()
+            return store:list_recurring()
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/recurring", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:create_recurring(body)
+        end)
+        return json_ok(res, 201)
+    end)
+
+    r.put("/api/recurring/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:update_recurring(id, body)
+        end)
+        return json_ok(res)
+    end)
+
+    r.delete("/api/recurring/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:delete_recurring(id)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/recurring/generate", function(req)
+        local body = req.body ~= "" and req:json() or {}
+        if is_error(body) then body = {} end
+        local ym = body.month or req.query["month"]
+        local res = locked(function()
+            return store:generate_recurring_for_month(ym)
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- GOALS (METAS FINANCEIRAS) ----
+    r.get("/api/goals", function(_)
+        local res = locked(function()
+            return store:list_goals()
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/goals", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:create_goal(body)
+        end)
+        return json_ok(res, 201)
+    end)
+
+    r.post("/api/goals/:id/contribute", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:contribute_goal(id, body.amount or 0)
+        end)
+        return json_ok(res)
+    end)
+
+    r.delete("/api/goals/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:delete_goal(id)
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- AUTO-CATEGORIZATION RULES ----
+    r.get("/api/rules", function(_)
+        local res = locked(function()
+            return store:list_rules()
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/rules", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return store:create_rule(body)
+        end)
+        return json_ok(res, 201)
+    end)
+
+    r.delete("/api/rules/:id", function(req)
+        local id = tonumber(req.params["id"])
+        if id == nil then return json_err("ID inválido", 400) end
+        local res = locked(function()
+            return store:delete_rule(id)
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- BANK STATEMENT IMPORT (OFX & CSV) ----
+    r.post("/api/import/preview", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return importer.preview_statement(store, body.content, body.filename, tonumber(body.account_id))
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/import/commit", function(req)
+        local body = parse_body(req)
+        if is_error(body) then return json_err(body.message, 400) end
+        local res = locked(function()
+            return importer.commit_statement(store, body)
+        end)
+        return json_ok(res)
+    end)
+
+    r.get("/api/import/sample", function(req)
+        local fmt = string.lower(req.query["format"] or "ofx")
+        local ym = req.query["month"]
+        if fmt == "csv" then
+            return json_ok({format = "CSV", filename = "extrato_exemplo.csv", content = importer.sample_csv(ym)})
+        else
+            return json_ok({format = "OFX", filename = "extrato_exemplo.ofx", content = importer.sample_ofx(ym)})
+        end
+    end)
+
+    -- ---- EXPORT CSV ----
+    r.get("/api/export/csv", function(req)
+        local ym = req.query["month"]
+        local rows = locked(function()
+            return store:list_transactions({month = ym})
+        end)
+        if is_error(rows) then return json_err(rows.message, 400) end
+
+        local out_rows = [
+            ["ID", "Data Vencimento", "Data Pagamento", "Tipo", "Status", "Descrição", "Categoria", "Conta", "Favorecido/Contato", "Valor", "Desconto", "Juros", "Valor Final"],
+        ]
+        for _, tx in rows do
+            out_rows[] = [
+                tostring(tx.id),
+                tx.due_date or "",
+                tx.payment_date or "",
+                tx.type or "",
+                tx.status or "",
+                tx.description or "",
+                tx.category_name or "",
+                tx.account_name or "",
+                tx.contact or "",
+                string.format("%.2f", tx.amount or 0),
+                string.format("%.2f", tx.discount or 0),
+                string.format("%.2f", tx.interest or 0),
+                string.format("%.2f", tx.final_amount or 0),
+            ]
+        end
+        local csv_text = csv.encode(out_rows, {sep = ";"})
+        if is_error(csv_text) then return json_err(csv_text.message, 500) end
+        return {
+            status = 200,
+            body = csv_text,
+            headers = {
+                ["Content-Type"] = "text/csv; charset=utf-8",
+                ["Content-Disposition"] = `attachment; filename="lancamentos_${ym or "todos"}.csv"`,
+            },
+        }
+    end)
+
+    -- ---- DEMO / RESET ----
+    r.post("/api/demo/seed", function(req)
+        local body = req.body ~= "" and req:json() or {}
+        if is_error(body) then body = {} end
+        local res = locked(function()
+            return store:seed_demo_data(body.month)
+        end)
+        return json_ok(res)
+    end)
+
+    r.post("/api/demo/clear", function(_)
+        local res = locked(function()
+            return store:clear_all_transactions()
+        end)
+        return json_ok(res)
+    end)
+
+    -- ---- STATIC FRONTEND ----
+    local static_handler = http.static(public_dir, {index = "index.html"})
+    r.get("/", static_handler)
+    r.get("/*", static_handler)
+
+    return r
+end
+
+return M

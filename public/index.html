@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FinançasSea — Sistema Completo de Gestão Financeira Pessoal</title>
+    <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+    <div class="app-layout">
+        <!-- SIDEBAR -->
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-logo">R$</div>
+                <div>
+                    <div class="brand-title">Finanças<span>Sea</span></div>
+                    <div class="brand-subtitle">Gestão Financeira Pessoal</div>
+                </div>
+            </div>
+
+            <nav class="nav-menu">
+                <button class="nav-item active" data-tab="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span>Visão Geral</span>
+                </button>
+                <button class="nav-item" data-tab="accounts">
+                    <span class="nav-icon">🏦</span>
+                    <span>Contas Bancárias</span>
+                </button>
+                <button class="nav-item" data-tab="transactions">
+                    <span class="nav-icon">📑</span>
+                    <span>Contas a Pagar e Receber</span>
+                </button>
+                <button class="nav-item" data-tab="cashflow">
+                    <span class="nav-icon">📈</span>
+                    <span>Fluxo de Caixa</span>
+                </button>
+                <button class="nav-item" data-tab="recurring">
+                    <span class="nav-icon">🔄</span>
+                    <span>Contas Recorrentes</span>
+                </button>
+                <button class="nav-item" data-tab="import">
+                    <span class="nav-icon">📥</span>
+                    <span>Importar Extrato (OFX/CSV)</span>
+                </button>
+                <button class="nav-item" data-tab="planning">
+                    <span class="nav-icon">🎯</span>
+                    <span>Categorias, Orçamento & Metas</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-accounts" id="sidebar-accounts-box">
+                <div class="sidebar-section-header">
+                    <span class="sidebar-section-title">SALDO NAS CONTAS</span>
+                    <button class="btn-sidebar-add" id="btn-sidebar-new-account" title="Cadastrar nova conta bancária">+ Conta</button>
+                </div>
+                <div id="sidebar-accounts-list" class="sidebar-acc-list"></div>
+            </div>
+
+            <div class="sidebar-footer">
+                <div style="display:flex; gap:6px;">
+                    <button class="btn btn-outline btn-sm" style="flex:1" id="btn-seed-demo" title="Popular dados de exemplo">
+                        ✨ Demo
+                    </button>
+                    <button class="btn btn-danger-soft btn-sm" style="flex:1" id="btn-clear-db" title="Apagar todos os lançamentos, contas e metas">
+                        🗑 Zerar Dados
+                    </button>
+                </div>
+                <div class="powered-by">Powered by <strong>Sea VM</strong> + SQLite</div>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <div class="main-wrapper">
+            <!-- TOPBAR -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <h1 id="page-title" class="page-title">Visão Geral</h1>
+                    <span id="page-subtitle" class="page-subtitle">Acompanhamento completo das suas finanças</span>
+                </div>
+
+                <div class="topbar-center">
+                    <div class="month-picker">
+                        <button class="month-nav-btn" id="btn-prev-month" title="Mês anterior">◀</button>
+                        <div class="month-display" id="current-month-label">Outubro 2026</div>
+                        <button class="month-nav-btn" id="btn-next-month" title="Próximo mês">▶</button>
+                        <button class="btn-today" id="btn-current-month" title="Voltar para o mês atual">Hoje</button>
+                    </div>
+                </div>
+
+                <div class="topbar-right">
+                    <button class="btn btn-danger-soft" id="btn-QuickExpense">
+                        <span>−</span> Nova Despesa
+                    </button>
+                    <button class="btn btn-success-soft" id="btn-QuickIncome">
+                        <span>+</span> Nova Receita
+                    </button>
+                    <button class="btn btn-primary" id="btn-NewTransaction">
+                        <span>+</span> Novo Lançamento
+                    </button>
+                </div>
+            </header>
+
+            <main class="content-area">
+                <!-- ==================== TAB 1: DASHBOARD ==================== -->
+                <section id="tab-dashboard" class="tab-panel active">
+                    <!-- KPI CARDS -->
+                    <div class="kpi-grid">
+                        <div class="kpi-card kpi-balance">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Saldo Atual em Contas</span>
+                                <span class="kpi-badge">Realizado</span>
+                            </div>
+                            <div class="kpi-value" id="dash-current-balance">R$ 0,00</div>
+                            <div class="kpi-sub">
+                                Projetado fim do mês: <strong id="dash-projected-balance">R$ 0,00</strong>
+                            </div>
+                        </div>
+
+                        <div class="kpi-card kpi-income">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Receitas no Mês</span>
+                                <span class="kpi-icon-pill income">▲ Entradas</span>
+                            </div>
+                            <div class="kpi-value text-success" id="dash-income-total">R$ 0,00</div>
+                            <div class="kpi-sub">
+                                Recebido: <strong id="dash-income-paid">R$ 0,00</strong> · A receber: <strong id="dash-income-pending">R$ 0,00</strong>
+                            </div>
+                        </div>
+
+                        <div class="kpi-card kpi-expense">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Despesas no Mês</span>
+                                <span class="kpi-icon-pill expense">▼ Saídas</span>
+                            </div>
+                            <div class="kpi-value text-danger" id="dash-expense-total">R$ 0,00</div>
+                            <div class="kpi-sub">
+                                Pago: <strong id="dash-expense-paid">R$ 0,00</strong> · A pagar: <strong id="dash-expense-pending">R$ 0,00</strong>
+                            </div>
+                        </div>
+
+                        <div class="kpi-card kpi-result">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Balanço / Resultado do Mês</span>
+                                <span class="kpi-badge" id="dash-savings-badge">Poupança: 0%</span>
+                            </div>
+                            <div class="kpi-value" id="dash-net-projected">R$ 0,00</div>
+                            <div class="kpi-sub">
+                                Resultado realizado hoje: <strong id="dash-net-realized">R$ 0,00</strong>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ALERTS ROW (OVERDUE & UPCOMING) -->
+                    <div class="grid-2col" id="dash-alerts-row">
+                        <div class="card alert-card overdue-card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">⚠️ Contas em Atraso (Vencidas)</h3>
+                                    <p class="card-desc">Pendências com vencimento anterior a hoje</p>
+                                </div>
+                                <span class="badge badge-danger" id="dash-overdue-count">0</span>
+                            </div>
+                            <div id="dash-overdue-list" class="compact-tx-list"></div>
+                        </div>
+
+                        <div class="card alert-card upcoming-card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">📅 Vencendo nos Próximos 7 Dias</h3>
+                                    <p class="card-desc">Contas a pagar e a receber próximas do vencimento</p>
+                                </div>
+                                <span class="badge badge-warning" id="dash-upcoming-count">0</span>
+                            </div>
+                            <div id="dash-upcoming-list" class="compact-tx-list"></div>
+                        </div>
+                    </div>
+
+                    <!-- CHARTS ROW -->
+                    <div class="grid-charts">
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">Evolução Diária de Caixa no Mês</h3>
+                                    <p class="card-desc">Linha sólida = Saldo Realizado · Linha tracejada = Saldo Projetado (com pendentes)</p>
+                                </div>
+                                <button class="btn btn-outline btn-sm" data-goto-tab="cashflow">Ver Fluxo Completo →</button>
+                            </div>
+                            <div class="chart-container" id="dash-cashflow-chart"></div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">Despesas por Categoria</h3>
+                                    <p class="card-desc">Distribuição dos gastos do mês selecionado</p>
+                                </div>
+                            </div>
+                            <div id="dash-category-chart" class="category-breakdown-box"></div>
+                        </div>
+                    </div>
+
+                    <!-- BUDGETS & GOALS ROW -->
+                    <div class="grid-2col">
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">Orçamento Mensal por Categoria</h3>
+                                    <p class="card-desc">Consumo do limite planejado (Pagos + A Pagar no mês)</p>
+                                </div>
+                                <button class="btn btn-outline btn-sm" data-goto-tab="planning">Ajustar Limites</button>
+                            </div>
+                            <div id="dash-budgets-list" class="budget-list"></div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">Metas Financeiras & Reservas</h3>
+                                    <p class="card-desc">Progresso dos seus objetivos financeiros</p>
+                                </div>
+                                <button class="btn btn-outline btn-sm" data-goto-tab="planning">+ Nova Meta</button>
+                            </div>
+                            <div id="dash-goals-list" class="goals-list"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ==================== TAB: CONTAS BANCÁRIAS ==================== -->
+                <section id="tab-accounts" class="tab-panel">
+                    <div class="kpi-grid">
+                        <div class="kpi-card">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Saldo Atual Consolidado</span>
+                                <span class="kpi-badge">Realizado</span>
+                            </div>
+                            <div class="kpi-value text-success" id="acc-kpi-current">R$ 0,00</div>
+                            <div class="kpi-sub">Soma de todas as contas bancárias ativas</div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Saldo Projetado</span>
+                                <span class="kpi-badge">Com Pendências</span>
+                            </div>
+                            <div class="kpi-value" id="acc-kpi-projected">R$ 0,00</div>
+                            <div class="kpi-sub">Considerando contas a pagar e a receber em aberto</div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Limites / Cheque Especial</span>
+                                <span class="kpi-badge">Crédito</span>
+                            </div>
+                            <div class="kpi-value text-info" id="acc-kpi-limits">R$ 0,00</div>
+                            <div class="kpi-sub">Soma dos limites cadastrados nas contas</div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-header">
+                                <span class="kpi-label">Contas Cadastradas</span>
+                                <span class="kpi-badge">Ativas</span>
+                            </div>
+                            <div class="kpi-value" id="acc-kpi-count">0</div>
+                            <div class="kpi-sub">Contas correntes, poupanças, carteiras e cartões</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">🏦 Minhas Contas Bancárias, Carteiras e Cartões</h3>
+                                <p class="card-desc">Cadastre suas contas bancárias com agência, conta, chave PIX, saldo inicial e limites, ou realize transferências e ajustes de saldo.</p>
+                            </div>
+                            <div class="header-btns">
+                                <button class="btn btn-outline" id="btn-transfer-between-accounts">⇄ Transferir entre Contas</button>
+                                <button class="btn btn-primary" id="btn-page-new-account">+ Cadastrar Conta Bancária</button>
+                            </div>
+                        </div>
+
+                        <div id="bank-accounts-grid" class="bank-cards-grid"></div>
+                    </div>
+                </section>
+
+                <!-- ==================== TAB 2: TRANSACTIONS ==================== -->
+                <section id="tab-transactions" class="tab-panel">
+                    <div class="card">
+                        <div class="tx-toolbar">
+                            <div class="tx-quick-tabs" id="tx-quick-tabs">
+                                <button class="pill-tab active" data-filter-tab="all">Todos</button>
+                                <button class="pill-tab" data-filter-tab="payable">Contas a Pagar</button>
+                                <button class="pill-tab" data-filter-tab="receivable">Contas a Receber</button>
+                                <button class="pill-tab" data-filter-tab="overdue">Em Atraso</button>
+                                <button class="pill-tab" data-filter-tab="paid">Pagos / Recebidos</button>
+                                <button class="pill-tab" data-filter-tab="transfer">Transferências</button>
+                            </div>
+
+                            <div class="tx-actions-right">
+                                <button class="btn btn-outline btn-sm" id="btn-export-csv">⬇ Exportar CSV</button>
+                                <button class="btn btn-primary btn-sm" id="btn-add-tx-inline">+ Lançar Conta</button>
+                            </div>
+                        </div>
+
+                        <div class="tx-filters-bar">
+                            <div class="filter-group filter-search">
+                                <input type="text" id="filter-search" class="form-input" placeholder="🔍 Buscar por descrição, favorecido, nota ou tag..." />
+                            </div>
+                            <div class="filter-group">
+                                <select id="filter-category" class="form-select">
+                                    <option value="">Todas as Categorias</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <select id="filter-account" class="form-select">
+                                    <option value="">Todas as Contas</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <select id="filter-type" class="form-select">
+                                    <option value="all">Tipo: Todos</option>
+                                    <option value="expense">Despesas (Saídas)</option>
+                                    <option value="income">Receitas (Entradas)</option>
+                                    <option value="transfer">Transferências</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <select id="filter-status" class="form-select">
+                                    <option value="all">Status: Todos</option>
+                                    <option value="pending">Pendentes (Em Aberto)</option>
+                                    <option value="paid">Baixados (Pagos/Recebidos)</option>
+                                    <option value="overdue">Vencidos (Em Atraso)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- SUMMARY STRIP -->
+                        <div class="tx-summary-strip">
+                            <div class="strip-item">
+                                <span>Lançamentos listados:</span>
+                                <strong id="tx-sum-count">0</strong>
+                            </div>
+                            <div class="strip-item">
+                                <span>Entradas na seleção:</span>
+                                <strong class="text-success" id="tx-sum-income">R$ 0,00</strong>
+                            </div>
+                            <div class="strip-item">
+                                <span>Saídas na seleção:</span>
+                                <strong class="text-danger" id="tx-sum-expense">R$ 0,00</strong>
+                            </div>
+                            <div class="strip-item">
+                                <span>Em aberto (A Pagar/Receber):</span>
+                                <strong class="text-warning" id="tx-sum-pending">R$ 0,00</strong>
+                            </div>
+                            <div class="strip-item">
+                                <span>Resultado da seleção:</span>
+                                <strong id="tx-sum-net">R$ 0,00</strong>
+                            </div>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Vencimento</th>
+                                        <th>Descrição / Favorecido</th>
+                                        <th>Categoria</th>
+                                        <th>Conta / Pagamento</th>
+                                        <th>Status</th>
+                                        <th class="text-right">Valor</th>
+                                        <th class="text-right">Ações</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tx-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ==================== TAB 3: CASH FLOW ==================== -->
+                <section id="tab-cashflow" class="tab-panel">
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Demonstração de Fluxo de Caixa (Realizado vs Projetado)</h3>
+                                <p class="card-desc">Acompanhe a evolução diária ou mensal do seu dinheiro, prevendo saldos futuros com base nas contas a pagar e a receber</p>
+                            </div>
+                            <div class="cf-controls">
+                                <div class="segmented-control">
+                                    <button class="seg-btn active" data-cf-mode="daily">Visão Diária (Mês)</button>
+                                    <button class="seg-btn" data-cf-mode="monthly">Visão Mensal (12 Meses)</button>
+                                </div>
+                                <select id="cf-account-filter" class="form-select">
+                                    <option value="">Todas as Contas (Consolidado)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="kpi-grid kpi-grid-5">
+                            <div class="mini-kpi">
+                                <span class="mini-kpi-label">Saldo Inicial</span>
+                                <strong class="mini-kpi-val" id="cf-opening">R$ 0,00</strong>
+                            </div>
+                            <div class="mini-kpi">
+                                <span class="mini-kpi-label">Total de Entradas (Real + Prev)</span>
+                                <strong class="mini-kpi-val text-success" id="cf-inflows">R$ 0,00</strong>
+                            </div>
+                            <div class="mini-kpi">
+                                <span class="mini-kpi-label">Total de Saídas (Real + Prev)</span>
+                                <strong class="mini-kpi-val text-danger" id="cf-outflows">R$ 0,00</strong>
+                            </div>
+                            <div class="mini-kpi">
+                                <span class="mini-kpi-label">Saldo Final Projetado</span>
+                                <strong class="mini-kpi-val" id="cf-closing-proj">R$ 0,00</strong>
+                            </div>
+                            <div class="mini-kpi">
+                                <span class="mini-kpi-label">Menor Saldo Projetado</span>
+                                <strong class="mini-kpi-val" id="cf-min-proj">R$ 0,00</strong>
+                            </div>
+                        </div>
+
+                        <div class="chart-container chart-large" id="cf-main-chart"></div>
+
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Período</th>
+                                        <th class="text-right">Saldo Inicial (Proj.)</th>
+                                        <th class="text-right">Entradas Realizadas</th>
+                                        <th class="text-right">Entradas A Receber</th>
+                                        <th class="text-right">Saídas Pagas</th>
+                                        <th class="text-right">Saídas A Pagar</th>
+                                        <th class="text-right">Geração Líquida</th>
+                                        <th class="text-right">Saldo Acum. Realizado</th>
+                                        <th class="text-right">Saldo Acum. Projetado</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cf-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ==================== TAB 4: RECURRING ACCOUNTS ==================== -->
+                <section id="tab-recurring" class="tab-panel">
+                    <div class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Contas Recorrentes (Fixas, Salários e Assinaturas)</h3>
+                                <p class="card-desc">Cadastre suas receitas e despesas fixas. O sistema gera automaticamente os lançamentos para cada mês de forma inteligente e sem duplicidade.</p>
+                            </div>
+                            <div class="header-btns">
+                                <button class="btn btn-outline" id="btn-generate-recurring">⚡ Gerar Lançamentos deste Mês</button>
+                                <button class="btn btn-primary" id="btn-new-recurring">+ Nova Conta Recorrente</button>
+                            </div>
+                        </div>
+
+                        <div class="tx-summary-strip">
+                            <div class="strip-item">
+                                <span>Regras ativas:</span>
+                                <strong id="rec-sum-count">0</strong>
+                            </div>
+                            <div class="strip-item">
+                                <span>Receitas Fixas Mensais:</span>
+                                <strong class="text-success" id="rec-sum-income">R$ 0,00</strong>
+                            </div>
+                            <div class="strip-item">
+                                <span>Despesas Fixas Mensais:</span>
+                                <strong class="text-danger" id="rec-sum-expense">R$ 0,00</strong>
+                            </div>
+                            <div class="strip-item">
+                                <span>Saldo Fixo Comprometido:</span>
+                                <strong id="rec-sum-net">R$ 0,00</strong>
+                            </div>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Dia Venc.</th>
+                                        <th>Descrição / Favorecido</th>
+                                        <th>Tipo</th>
+                                        <th>Categoria</th>
+                                        <th>Conta Padrão</th>
+                                        <th>Frequência</th>
+                                        <th>Baixa Automática</th>
+                                        <th class="text-right">Valor</th>
+                                        <th class="text-right">Ações</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="rec-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ==================== TAB 5: BANK IMPORT & RECONCILIATION ==================== -->
+                <section id="tab-import" class="tab-panel">
+                    <div class="grid-import">
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">🏦 Importar Extrato Bancário (OFX ou CSV)</h3>
+                                    <p class="card-desc">Compatível com Itaú, Bradesco, Nubank, Banco do Brasil, Santander, Inter, Caixa, C6 e qualquer OFX/CSV padrão</p>
+                                </div>
+                                <div class="header-btns">
+                                    <button class="btn btn-outline btn-sm" id="btn-sample-ofx">📄 Carregar OFX de Exemplo</button>
+                                    <button class="btn btn-outline btn-sm" id="btn-sample-csv">📊 Carregar CSV de Exemplo</button>
+                                </div>
+                            </div>
+
+                            <div class="form-grid-2">
+                                <div class="form-group">
+                                    <label class="form-label">Conta Bancária do Extrato</label>
+                                    <select id="import-account-id" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Selecionar Arquivo (.ofx ou .csv)</label>
+                                    <input type="file" id="import-file-input" accept=".ofx,.csv,.txt" class="form-input" />
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label class="form-label">Conteúdo do Extrato (você também pode colar o texto OFX ou CSV diretamente abaixo)</label>
+                                <textarea id="import-raw-content" class="form-textarea" rows="6" placeholder="Selecione um arquivo .ofx/.csv acima, clique em 'Carregar OFX de Exemplo', ou cole aqui o conteúdo do seu extrato..."></textarea>
+                            </div>
+
+                            <div class="form-actions">
+                                <button class="btn btn-primary" id="btn-preview-import">🔍 Analisar Extrato e Conciliar</button>
+                            </div>
+                        </div>
+
+                        <!-- RULES CARD -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">🤖 Regras de Auto-Categorização</h3>
+                                    <p class="card-desc">Palavras-chave que categorizam seu extrato automaticamente</p>
+                                </div>
+                            </div>
+                            <form id="form-new-rule" class="inline-rule-form">
+                                <input type="text" id="rule-keyword" class="form-input" placeholder="Ex: UBER, IFOOD, CEMIG..." required />
+                                <select id="rule-category" class="form-select" required></select>
+                                <button type="submit" class="btn btn-outline btn-sm">+ Regra</button>
+                            </form>
+                            <div id="rules-list-box" class="rules-scroll-box"></div>
+                        </div>
+                    </div>
+
+                    <!-- PREVIEW & RECONCILIATION RESULTS -->
+                    <div class="card" id="import-preview-card" style="display: none;">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">Revisão e Conciliação Bancária</h3>
+                                <p class="card-desc" id="import-preview-summary">Analisando transações...</p>
+                            </div>
+                            <div class="header-btns">
+                                <button class="btn btn-outline" id="btn-cancel-import">Cancelar</button>
+                                <button class="btn btn-primary" id="btn-commit-import">✅ Confirmar Importação e Conciliação</button>
+                            </div>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Data</th>
+                                        <th>Descrição no Extrato</th>
+                                        <th>Tipo</th>
+                                        <th class="text-right">Valor</th>
+                                        <th>Ação de Conciliação</th>
+                                        <th>Categoria / Vínculo</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="import-preview-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ==================== TAB 6: PLANNING (ACCOUNTS, CATEGORIES, GOALS) ==================== -->
+                <section id="tab-planning" class="tab-panel">
+                    <div class="grid-3col">
+                        <!-- ACCOUNTS -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">🏦 Contas & Carteiras</h3>
+                                    <p class="card-desc">Contas correntes, reservas e cartões</p>
+                                </div>
+                                <button class="btn btn-primary btn-sm" id="btn-new-account">+ Nova Conta</button>
+                            </div>
+                            <div id="planning-accounts-list" class="planning-list"></div>
+                        </div>
+
+                        <!-- CATEGORIES & BUDGETS -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">🏷️ Categorias & Orçamento</h3>
+                                    <p class="card-desc">Categorias de receita, despesa e tetos de gasto</p>
+                                </div>
+                                <button class="btn btn-primary btn-sm" id="btn-new-category">+ Categoria</button>
+                            </div>
+                            <div id="planning-categories-list" class="planning-list"></div>
+                        </div>
+
+                        <!-- GOALS -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div>
+                                    <h3 class="card-title">🎯 Metas & Reservas</h3>
+                                    <p class="card-desc">Objetivos financeiros e caixinhas</p>
+                                </div>
+                                <button class="btn btn-primary btn-sm" id="btn-new-goal">+ Nova Meta</button>
+                            </div>
+                            <div id="planning-goals-list" class="planning-list"></div>
+                        </div>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <!-- ==================== MODAL: LANÇAMENTO (CONTA A PAGAR / RECEBER / TRANSFERÊNCIA) ==================== -->
+    <div class="modal-backdrop" id="modal-tx" style="display: none;">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-tx-title">Novo Lançamento</h3>
+                <button class="modal-close" data-close-modal="modal-tx">✕</button>
+            </div>
+            <form id="form-tx">
+                <input type="hidden" id="tx-id" />
+                <div class="modal-body">
+                    <div class="type-selector-bar">
+                        <label class="type-radio expense">
+                            <input type="radio" name="tx-type" value="expense" checked />
+                            <span>▼ Conta a Pagar (Despesa)</span>
+                        </label>
+                        <label class="type-radio income">
+                            <input type="radio" name="tx-type" value="income" />
+                            <span>▲ Conta a Receber (Receita)</span>
+                        </label>
+                        <label class="type-radio transfer">
+                            <input type="radio" name="tx-type" value="transfer" />
+                            <span>⇄ Transferência entre Contas</span>
+                        </label>
+                    </div>
+
+                    <div class="form-grid-3">
+                        <div class="form-group span-2">
+                            <label class="form-label">Descrição do Lançamento *</label>
+                            <input type="text" id="tx-description" class="form-input" placeholder="Ex: Aluguel, Supermercado, Cliente X..." required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Valor (R$) *</label>
+                            <input type="number" id="tx-amount" class="form-input" step="0.01" min="0.01" placeholder="0,00" required />
+                        </div>
+                    </div>
+
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Data de Vencimento *</label>
+                            <input type="date" id="tx-due-date" class="form-input" required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Situação / Status</label>
+                            <select id="tx-status" class="form-select">
+                                <option value="pending">⏳ Pendente (A Pagar / A Receber)</option>
+                                <option value="paid">✅ Já Pago / Recebido</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="tx-pay-date-group">
+                            <label class="form-label">Data do Pagamento/Recebimento</label>
+                            <input type="date" id="tx-payment-date" class="form-input" />
+                        </div>
+                    </div>
+
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label" id="tx-account-label">Conta Bancária / Carteira *</label>
+                            <select id="tx-account-id" class="form-select" required></select>
+                        </div>
+                        <div class="form-group" id="tx-category-group">
+                            <label class="form-label">Categoria *</label>
+                            <select id="tx-category-id" class="form-select"></select>
+                        </div>
+                        <div class="form-group" id="tx-dest-account-group" style="display: none;">
+                            <label class="form-label">Conta de Destino *</label>
+                            <select id="tx-dest-account-id" class="form-select"></select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Forma de Pagamento</label>
+                            <select id="tx-payment-method" class="form-select">
+                                <option value="pix">PIX</option>
+                                <option value="boleto">Boleto Bancário</option>
+                                <option value="credit_card">Cartão de Crédito</option>
+                                <option value="debit_card">Cartão de Débito</option>
+                                <option value="transfer">TED / DOC / Transferência</option>
+                                <option value="auto_debit">Débito Automático</option>
+                                <option value="cash">Dinheiro em Espécie</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-grid-4">
+                        <div class="form-group span-2">
+                            <label class="form-label">Pagador / Favorecido / Fornecedor</label>
+                            <input type="text" id="tx-contact" class="form-input" placeholder="Ex: Imobiliária, Cemig, Empresa..." />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Desconto (R$)</label>
+                            <input type="number" id="tx-discount" class="form-input" step="0.01" min="0" value="0" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Juros / Multa (R$)</label>
+                            <input type="number" id="tx-interest" class="form-input" step="0.01" min="0" value="0" />
+                        </div>
+                    </div>
+
+                    <div class="form-grid-3" id="tx-installments-row">
+                        <div class="form-group">
+                            <label class="form-label">Parcelamento (Nº de Parcelas)</label>
+                            <select id="tx-installments" class="form-select">
+                                <option value="1">À vista / Parcela única (1x)</option>
+                                <option value="2">2x mensais</option>
+                                <option value="3">3x mensais</option>
+                                <option value="4">4x mensais</option>
+                                <option value="5">5x mensais</option>
+                                <option value="6">6x mensais</option>
+                                <option value="8">8x mensais</option>
+                                <option value="10">10x mensais</option>
+                                <option value="12">12x mensais</option>
+                                <option value="18">18x mensais</option>
+                                <option value="24">24x mensais</option>
+                                <option value="36">36x mensais</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Tags (separadas por vírgula)</label>
+                            <input type="text" id="tx-tags" class="form-input" placeholder="Ex: casa, urgente, viagem" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Observações</label>
+                            <input type="text" id="tx-notes" class="form-input" placeholder="Anotações extras..." />
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline" data-close-modal="modal-tx">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">💾 Salvar Lançamento</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ==================== MODAL: DAR BAIXA (PAGAR / RECEBER CONTA) ==================== -->
+    <div class="modal-backdrop" id="modal-pay" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-pay-title">Dar Baixa em Lançamento</h3>
+                <button class="modal-close" data-close-modal="modal-pay">✕</button>
+            </div>
+            <form id="form-pay">
+                <input type="hidden" id="pay-tx-id" />
+                <div class="modal-body">
+                    <div class="pay-summary-banner" id="pay-summary-banner"></div>
+                    <div class="form-grid-2">
+                        <div class="form-group">
+                            <label class="form-label">Data da Baixa (Pagamento/Recebimento) *</label>
+                            <input type="date" id="pay-date" class="form-input" required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Conta Bancária Utilizada *</label>
+                            <select id="pay-account-id" class="form-select" required></select>
+                        </div>
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Valor Original (R$)</label>
+                            <input type="number" id="pay-amount" class="form-input" step="0.01" required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Desconto Obtido (R$)</label>
+                            <input type="number" id="pay-discount" class="form-input" step="0.01" min="0" value="0" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Juros / Multa (R$)</label>
+                            <input type="number" id="pay-interest" class="form-input" step="0.01" min="0" value="0" />
+                        </div>
+                    </div>
+                    <div class="pay-final-box">
+                        Valor Final Efetivo: <strong id="pay-final-display">R$ 0,00</strong>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline" data-close-modal="modal-pay">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">✅ Confirmar Baixa</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ==================== MODAL: CONTA RECORRENTE ==================== -->
+    <div class="modal-backdrop" id="modal-recurring" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-rec-title">Nova Conta Recorrente</h3>
+                <button class="modal-close" data-close-modal="modal-recurring">✕</button>
+            </div>
+            <form id="form-recurring">
+                <input type="hidden" id="rec-id" />
+                <div class="modal-body">
+                    <div class="form-grid-2">
+                        <div class="form-group">
+                            <label class="form-label">Descrição *</label>
+                            <input type="text" id="rec-description" class="form-input" placeholder="Ex: Aluguel, Salário, Internet..." required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Valor (R$) *</label>
+                            <input type="number" id="rec-amount" class="form-input" step="0.01" min="0.01" required />
+                        </div>
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Tipo *</label>
+                            <select id="rec-type" class="form-select">
+                                <option value="expense">Despesa Fixa (A Pagar)</option>
+                                <option value="income">Receita Fixa (A Receber)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Frequência *</label>
+                            <select id="rec-frequency" class="form-select">
+                                <option value="monthly">Mensal</option>
+                                <option value="weekly">Semanal</option>
+                                <option value="biweekly">Quinzenal</option>
+                                <option value="bimonthly">Bimestral (a cada 2 meses)</option>
+                                <option value="quarterly">Trimestral (a cada 3 meses)</option>
+                                <option value="semiannual">Semestral (a cada 6 meses)</option>
+                                <option value="yearly">Anual</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Dia do Vencimento (1-31) *</label>
+                            <input type="number" id="rec-day" class="form-input" min="1" max="31" value="5" required />
+                        </div>
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group">
+                            <label class="form-label">Categoria *</label>
+                            <select id="rec-category-id" class="form-select"></select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Conta Padrão *</label>
+                            <select id="rec-account-id" class="form-select"></select>
+                        </div>
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Data de Início *</label>
+                            <input type="date" id="rec-start-date" class="form-input" required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Data Fim (Opcional)</label>
+                            <input type="date" id="rec-end-date" class="form-input" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Baixa Automática?</label>
+                            <select id="rec-auto-pay" class="form-select">
+                                <option value="0">Gerar como Pendente</option>
+                                <option value="1">Baixar Automaticamente no Dia</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Favorecido / Pagador</label>
+                        <input type="text" id="rec-contact" class="form-input" placeholder="Ex: Imobiliária, Empresa..." />
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline" data-close-modal="modal-recurring">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">💾 Salvar Recorrência</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ==================== MODAL: CONTA BANCÁRIA ==================== -->
+    <div class="modal-backdrop" id="modal-account" style="display: none;">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-acc-title">Cadastrar Conta Bancária / Carteira</h3>
+                <button class="modal-close" data-close-modal="modal-account">✕</button>
+            </div>
+            <form id="form-account">
+                <input type="hidden" id="acc-id" />
+                <div class="modal-body">
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Banco / Instituição (Atalho)</label>
+                            <select id="acc-bank-preset" class="form-select">
+                                <option value="">Selecionar banco ou digitar...</option>
+                                <option value="341|Itaú Unibanco|#f97316">341 - Itaú Unibanco</option>
+                                <option value="001|Banco do Brasil|#eab308">001 - Banco do Brasil</option>
+                                <option value="260|Nubank|#8b5cf6">260 - Nubank</option>
+                                <option value="237|Bradesco|#ef4444">237 - Bradesco</option>
+                                <option value="104|Caixa Econômica Federal|#3b82f6">104 - Caixa Econômica</option>
+                                <option value="033|Santander|#dc2626">033 - Santander</option>
+                                <option value="077|Banco Inter|#f97316">077 - Banco Inter</option>
+                                <option value="336|C6 Bank|#64748b">336 - C6 Bank</option>
+                                <option value="208|BTG Pactual|#2563eb">208 - BTG Pactual</option>
+                                <option value="748|Sicredi|#16a34a">748 - Sicredi</option>
+                                <option value="756|Sicoob|#10b981">756 - Sicoob</option>
+                                <option value="348|XP Investimentos|#eab308">348 - XP Investimentos</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Nome / Apelido da Conta *</label>
+                            <input type="text" id="acc-name" class="form-input" placeholder="Ex: Itaú Conta Principal, Nubank PJ..." required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Tipo de Conta *</label>
+                            <select id="acc-type" class="form-select">
+                                <option value="checking">Conta Corrente</option>
+                                <option value="digital">Conta Digital / Pagamento</option>
+                                <option value="savings">Conta Poupança / Reserva</option>
+                                <option value="investment">Investimentos / Corretora</option>
+                                <option value="wallet">Carteira Física (Dinheiro)</option>
+                                <option value="credit_card">Cartão de Crédito</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-grid-4">
+                        <div class="form-group">
+                            <label class="form-label">Nome da Instituição</label>
+                            <input type="text" id="acc-institution" class="form-input" placeholder="Ex: Itaú, Nubank, BB..." />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Cód. Banco (COMPE)</label>
+                            <input type="text" id="acc-bank-code" class="form-input" placeholder="Ex: 341, 001, 260" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Agência</label>
+                            <input type="text" id="acc-branch" class="form-input" placeholder="Ex: 0001" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Número da Conta</label>
+                            <input type="text" id="acc-number" class="form-input" placeholder="Ex: 12345-6" />
+                        </div>
+                    </div>
+
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Saldo Inicial de Abertura (R$) *</label>
+                            <input type="number" id="acc-initial-balance" class="form-input" step="0.01" value="0" required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Limite Cheque Especial / Crédito (R$)</label>
+                            <input type="number" id="acc-credit-limit" class="form-input" step="0.01" min="0" value="0" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Cor de Identificação</label>
+                            <input type="color" id="acc-color" class="form-input form-color" value="#10b981" />
+                        </div>
+                    </div>
+
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Chave PIX Principal</label>
+                            <input type="text" id="acc-pix-key" class="form-input" placeholder="CPF, E-mail, Celular ou Aleatória" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Dia Fechamento (Cartão)</label>
+                            <input type="number" id="acc-closing-day" class="form-input" min="1" max="31" value="1" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Dia Vencimento (Cartão)</label>
+                            <input type="number" id="acc-due-day" class="form-input" min="1" max="31" value="10" />
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Observações / Dados do Gerente</label>
+                        <input type="text" id="acc-notes" class="form-input" placeholder="Ex: Conta salário, gerente João, pacote isento de tarifas..." />
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline" data-close-modal="modal-account">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">💾 Salvar Conta Bancária</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ==================== MODAL: CATEGORIA & ORÇAMENTO ==================== -->
+    <div class="modal-backdrop" id="modal-category" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-cat-title">Nova Categoria</h3>
+                <button class="modal-close" data-close-modal="modal-category">✕</button>
+            </div>
+            <form id="form-category">
+                <input type="hidden" id="cat-id" />
+                <div class="modal-body">
+                    <div class="form-grid-2">
+                        <div class="form-group">
+                            <label class="form-label">Nome da Categoria *</label>
+                            <input type="text" id="cat-name" class="form-input" placeholder="Ex: Supermercado, Salário..." required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Tipo *</label>
+                            <select id="cat-type" class="form-select">
+                                <option value="expense">Despesa (Saída)</option>
+                                <option value="income">Receita (Entrada)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group">
+                            <label class="form-label">Orçamento / Teto Mensal (R$)</label>
+                            <input type="number" id="cat-budget" class="form-input" step="0.01" min="0" value="0" placeholder="0 = sem limite" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Cor</label>
+                            <input type="color" id="cat-color" class="form-input form-color" value="#6366f1" />
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline" data-close-modal="modal-category">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">💾 Salvar Categoria</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ==================== MODAL: META FINANCEIRA ==================== -->
+    <div class="modal-backdrop" id="modal-goal" style="display: none;">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Nova Meta Financeira</h3>
+                <button class="modal-close" data-close-modal="modal-goal">✕</button>
+            </div>
+            <form id="form-goal">
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label class="form-label">Nome do Objetivo *</label>
+                        <input type="text" id="goal-name" class="form-input" placeholder="Ex: Reserva de Emergência, Viagem..." required />
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group">
+                            <label class="form-label">Valor Alvo (R$) *</label>
+                            <input type="number" id="goal-target" class="form-input" step="0.01" min="1" required />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Valor Já Guardado (R$)</label>
+                            <input type="number" id="goal-current" class="form-input" step="0.01" min="0" value="0" />
+                        </div>
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group">
+                            <label class="form-label">Data Limite Desejada</label>
+                            <input type="date" id="goal-deadline" class="form-input" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Cor</label>
+                            <input type="color" id="goal-color" class="form-input form-color" value="#10b981" />
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline" data-close-modal="modal-goal">Cancelar</button>
+                    <button type="submit" class="btn btn-primary">💾 Criar Meta</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- TOAST CONTAINER -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
